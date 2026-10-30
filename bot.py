@@ -26,43 +26,115 @@ def run_flask():
 TOKEN = "9207120214:AAH7jBlm1ojESyUeWr2PUdTjOtT4_U2da6k"
 CHANNEL_USERNAME = "@cinamareport"
 
-# ذخیره موقت اطلاعات پست و وضعیت زمان‌بندی ادمین‌ها
+# حافظه موقت برای ذخیره پیام‌های چندگانه ادمین‌ها
+user_sessions = {}
 user_drafts = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user_sessions[user_id] = {"texts": [], "photo": None}
     await update.message.reply_text(
         "🎬 *سلام مدیر عزیز!*\n\n"
-        "پوستر فیلم را به همراه متن اطلاعات و لینک‌ها بفرست تا پست آماده شود.",
+        "برای سریال‌های طولانی:\n"
+        "۱. ابتدا **پوستر سریال** رو به همراه نام سریال در کپشن بفرست.\n"
+        "۲. سپس لینک‌های فصل‌ها و کیفیت‌ها رو در **چند پیام پیاپی** بفرست.\n"
+        "۳. در نهایت کلمه `/done` رو بفرست تا ربات کل پست رو با دکمه‌های تفکیک‌شده آماده کنه! 🍿",
         parse_mode="Markdown"
     )
 
-# تابع ارسال پست به کانال (برای انتشار فوری یا زمان‌بندی‌شده)
-async def send_to_channel(bot, user_id):
-    if user_id not in user_drafts:
+# دستور برای پایان جمع‌آوری لینک‌ها و ساخت پست نهایی سریال
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id not in user_sessions or not user_sessions[user_id]["texts"]:
+        await update.message.reply_text("❌ هیچ اطلاعاتی ثبت نشده است. ابتدا پوستر و لینک‌ها را بفرستید.")
         return
-    draft = user_drafts[user_id]
-    photo_file_id = draft["photo"]
-    post_text = draft["text"]
-    download_links = draft["links"]
 
+    session = user_sessions[user_id]
+    all_text = "\n".join(session["texts"])
+    photo_file_id = session["photo"]
+
+    lines = [line.strip() for line in all_text.split('\n') if line.strip()]
+    title_input = lines[0] if lines else "عنوان سریال"
+
+    # پردازش هوشمند فصل‌ها و قسمت‌ها
     keyboard = []
-    for quality, link in download_links.items():
-        keyboard.append([InlineKeyboardButton(f"📥 دانلود کیفیت {quality}", url=link)])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    current_label = "لینک دانلود"
 
+    for line in lines[1:]:
+        lower_line = line.lower()
+        link = ""
+        if "http" in line:
+            parts = line.split("http", 1)
+            link = "http" + parts[1].strip().split()[0]
+
+        if not link:
+            # اگر لینک نبود، این خط عنوان فصل یا کیفیت است (مثل "فصل اول کیفیت 1080")
+            current_label = line
+            continue
+
+        # استخراج شماره قسمت (مثلا E01) از لینک یا متن برای نام دکمه
+        ep_name = "قسمت نامشخص"
+        for part in link.split('/'):
+            if 'e' in part.lower() and any(char.isdigit() for char in part):
+                ep_name = part.split('.')[-1] if '.' in part else part
+                break
+        
+        # اگر در لینک پیدا نشد، از روی متن حدس می‌زنیم
+        if ep_name == "قسمت نامشخص":
+            ep_name = "لینک دانلود"
+
+        button_text = f"📥 {current_label} ({ep_name})"
+        keyboard.append([InlineKeyboardButton(button_text, url=link)])
+
+    # دکمه‌های انتشار
+    publish_buttons = [
+        InlineKeyboardButton("🚀 انتشار همین الان", callback_data="pub_now"),
+        InlineKeyboardButton("⏰ تنظیم زمان", callback_data="pub_later")
+    ]
+    keyboard.append(publish_buttons)
+
+    post_text = (
+        f"📺 *CinamaReport | معرفی سریال*\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"#سریال | *{title_input}*\n"
+        f"⭐ *IMDb:* 8.2/10\n"
+        f"🍅 *Rotten Tomatoes:* ۸۵٪ (منتقدان)\n"
+        f"🎭 *ژانر:* درام | رازآلود | فلسفی\n"
+        f"🌍 *محصول:* آمریکا\n"
+        f"🎬 *سازنده:* دیمون لینلوف\n"
+        f"🗣 *وضعیت پخش:* کامل با زیرنویس چسبیده فارسی\n\n"
+        f"📖 *خلاصه داستان (بدون اسپویل):*\n"
+        f"تصور کنید در یک ثانیه، دو درصد از جمعیت کل کره زمین بدون هیچ رد و نشانی ناپدید شوند... دنیایی که باقی می‌ماند با اندوهی بزرگ و سوالاتی بی‌پاسخ دست‌وپنجه نرم می‌کند.\n\n"
+        f"🔥 *چرا ارزش دیدن داره؟*\n"
+        f"• یکی از عمیق‌ترین و فلسفی‌ترین سریال‌های تاریخ تلویزیون.\n"
+        f"• موسیقی متن شاهکار و بازی‌های خیره‌کننده که تا اعماق وجودتون نفوذ می‌کنه.\n"
+        f"اگه به آثار مفهومی و متفاوت علاقه داری، این شاهکار رو از دست نده. ❤️‍🩹\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🎥 @cinamareport \n"
+        f"معرفی فیلم و سریال بدون اسپویل 🍿"
+    )
+
+    user_drafts[user_id] = {
+        "photo": photo_file_id,
+        "text": post_text,
+        "keyboard": keyboard,
+        "waiting_for_time": False
+    }
+
+    # پاکسازی سشن موقت
+    del user_sessions[user_id]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
     if photo_file_id:
-        await bot.send_photo(
-            chat_id=CHANNEL_USERNAME,
+        await update.message.reply_photo(
             photo=photo_file_id,
-            caption=post_text,
+            caption="📌 *پیش‌نمایش پست سریال:*\n\n" + post_text,
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
     else:
-        await bot.send_message(
-            chat_id=CHANNEL_USERNAME,
-            text=post_text,
+        await update.message.reply_text(
+            text="📌 *پیش‌نمایش پست سریال:*\n\n" + post_text,
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
@@ -71,137 +143,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.message.from_user.id
         user_text = update.message.caption or update.message.text
-        
+
         if not user_text:
-            await update.message.reply_text("❌ لطفا متن اطلاعات فیلم را همراه با پوستر بفرستید.")
             return
 
-        # بررسی اینکه آیا کاربر در حال تنظیم زمان انتشار است؟
+        # اگر کاربر در حال تنظیم ساعت زمان‌بندی بود
         if user_id in user_drafts and user_drafts[user_id].get("waiting_for_time"):
-            time_str = user_text.strip() # مثلاً 21:30
+            time_str = user_text.strip()
             try:
                 now = datetime.now()
                 target_hour, target_minute = map(int, time_str.split(':'))
                 target_time = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-                
                 if target_time <= now:
-                    # اگر ساعتی که داده گذشته است، یعنی برای فرداست
                     target_time += timedelta(days=1)
-                
                 delay = (target_time - now).total_seconds()
-                
-                # تنظیم تایمر برای ارسال پست در زمان مشخص‌شده
                 threading.Timer(delay, lambda: asyncio_run_coroutine(send_to_channel(context.bot, user_id))).start()
-                
                 user_drafts[user_id]["waiting_for_time"] = False
-                await update.message.reply_text(
-                    f"⏰ *زمان‌بندی با موفقیت انجام شد!*\n"
-                    f"پست شما امشب در ساعت *{time_str}* به‌طور خودکار در کانال @cinamareport منتشر خواهد شد. 🚀",
-                    parse_mode="Markdown"
-                )
+                await update.message.reply_text(f"⏰ زمان‌بندی انجام شد! پست ساعت *{time_str}* منتشر می‌شود. 🚀", parse_mode="Markdown")
                 return
-            except Exception as ex:
-                await update.message.reply_text("❌ فرمت ساعت نامعتبر است. لطفاً ساعت را به شکل درست (مثلاً 21:30) بفرستید.")
+            except Exception:
+                await update.message.reply_text("❌ فرمت ساعت نامعتبر است (مثال: 21:30)")
                 return
 
-        # پردازش معمولی پست جدید (پوستر + متن اطلاعات)
-        photo_file_id = None
+        # سیستم جمع‌آوری پیام‌های چندگانه سریال
+        if user_id not in user_sessions:
+            user_sessions[user_id] = {"texts": [], "photo": None}
+
         if update.message.photo:
-            photo_file_id = update.message.photo[-1].file_id
+            user_sessions[user_id]["photo"] = update.message.photo[-1].file_id
 
-        lines = [line.strip() for line in user_text.split('\n') if line.strip()]
-        title_input = lines[0] if lines else "عنوان نامشخص"
+        user_sessions[user_id]["texts"].append(user_text)
         
-        download_links = {}
-        for line in lines[1:]:
-            lower_line = line.lower()
-            link = ""
-            if "http" in line:
-                parts = line.split("http", 1)
-                link = "http" + parts[1].strip().split()[0]
-
-            if not link:
-                continue
-
-            if "1080" in lower_line:
-                download_links["1080p"] = link
-            elif "720" in lower_line:
-                download_links["720p"] = link
-            elif "480" in lower_line:
-                download_links["480p"] = link
-            else:
-                if "1080p" not in download_links:
-                    download_links["1080p"] = link
-                elif "720p" not in download_links:
-                    download_links["720p"] = link
-                elif "480p" not in download_links:
-                    download_links["480p"] = link
-
-        is_series = "سریال" in title_input or "season" in title_input.lower() or "فصل" in title_input
-        media_type = "سریال" if is_series else "فیلم"
-        header_emoji = "📺" if is_series else "🎬"
-        tag = "#سریال" if is_series else "#فیلم"
-
-        # اصلاح فرمت بولدسازی با تک ستاره (*) برای تلگرام
-        post_text = (
-            f"{header_emoji} *CinamaReport | معرفی {media_type}*\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"{tag} | *{title_input}*\n"
-            f"⭐ *IMDb:* 7.6/10\n"
-            f"🍅 *Rotten Tomatoes:* ۷۸٪ (منتقدان) | ۸۲٪ (مخاطبان)\n"
-            f"🎭 *ژانر:* درام | معمایی | هیجان‌انگیز\n"
-            f"🌍 *محصول:* آمریکا | بریتانیا\n"
-            f"🎬 *کارگردان:* نام کارگردان\n"
-            f"👤 *بازیگران:* بازیگر اول | بازیگر دوم\n"
-            f"⏱ *مدت زمان:* ۱۱۵ دقیقه\n"
-            f"🗣 *نسخه:* زیرنویس چسبیده فارسی\n\n"
-            f"📖 *خلاصه داستان (بدون اسپویل):*\n"
-            f"گاهی یک اتفاق کوچک در ظاهر بی‌اهمیت، می‌تواند کل مسیر زندگی آدم‌ها را در کسری از ثانیه تغییر دهد و رازهایی را برملا کند که سال‌ها دفن شده بودند...\n\n"
-            f"🔥 *چرا ارزش دیدن داره؟*\n"
-            f"• فضاسازی فوق‌العاده تاریک و گیرایی داره که از همون دقیقه‌ی اول قفل می‌شی روش.\n"
-            f"• شخصیت‌پردازی‌ها انقدر دقیق و ملموسه که کاملاً باهاشون همذات‌پنداری می‌کنی.\n"
-            f"• پایان‌بندی اثر جوریه که تا ساعت‌ها بعدِ تموم شدن فیلم داری به لایه‌های پنهانش فکر می‌کنی!\n"
-            f"اگه دنبال یه تجربه‌ی خاص و پر از تعلیق هستی، این اثر رو به هیچ وجه از دست نده. ❤️‍🩹\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"🎥 @cinamareport \n"
-            f"معرفی فیلم و سریال بدون اسپویل 🍿"
+        await update.message.reply_text(
+            "📥 بخش از اطلاعات دریافت شد.\n"
+            "اگر لینک دیگری دارید بفرستید، و وقتی تمام شد کلمه `/done` را ارسال کنید تا پیش‌نمایش پست را تحویل بگیرید."
         )
-
-        user_drafts[user_id] = {
-            "photo": photo_file_id,
-            "text": post_text,
-            "links": download_links,
-            "waiting_for_time": False
-        }
-
-        keyboard = []
-        for quality, link in download_links.items():
-            keyboard.append([InlineKeyboardButton(f"📥 دانلود کیفیت {quality}", url=link)])
-        
-        keyboard.append([
-            InlineKeyboardButton("🚀 انتشار همین الان در کانال", callback_data="pub_now"),
-            InlineKeyboardButton("⏰ تنظیم زمان انتشار", callback_data="pub_later")
-        ])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        if photo_file_id:
-            await update.message.reply_photo(
-                photo=photo_file_id,
-                caption="📌 *پیش‌نمایش پست با پوستر:*\n\n" + post_text,
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
-        else:
-            await update.message.reply_text(
-                text="📌 *پیش‌نمایش پست (بدون پوستر):*\n\n" + post_text,
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
     except Exception as e:
-        await update.message.reply_text(f"خطا در پردازش: {e}")
+        await update.message.reply_text(f"خطا: {e}")
 
-# تابع کمکی برای اجرای coroutine در ترد تایمر
+async def send_to_channel(bot, user_id):
+    if user_id not in user_drafts:
+        return
+    draft = user_drafts[user_id]
+    if draft["photo"]:
+        await bot.send_photo(chat_id=CHANNEL_USERNAME, photo=draft["photo"], caption=draft["text"], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(draft["keyboard"]))
+    else:
+        await bot.send_message(chat_id=CHANNEL_USERNAME, text=draft["text"], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(draft["keyboard"]))
+
 def asyncio_run_coroutine(coro):
     import asyncio
     asyncio.run(coro)
@@ -212,29 +200,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     
     if user_id not in user_drafts:
-        await query.edit_message_text("❌ اطلاعات پست منقضی شده است. لطفا دوباره پوستر و اطلاعات را بفرستید.")
+        await query.edit_message_text("❌ منقضی شده است. لطفا دوباره شروع کنید.")
         return
 
     if query.data == "pub_now":
         await send_to_channel(context.bot, user_id)
-        await query.edit_message_text("✅ پست همراه با پوستر با موفقیت در کانال @cinamareport منتشر شد! 🎉")
-        
+        await query.edit_message_text("✅ پست سریال با موفقیت در کانال منتشر شد! 🎉")
     elif query.data == "pub_later":
         user_drafts[user_id]["waiting_for_time"] = True
-        await query.edit_message_text(
-            "⏰ *سیستم زمان‌بندی فعال شد*\n\n"
-            "لطفاً ساعت انتشار پست را به فرمت `HH:MM` (مثلاً `21:30`) در قالب یک پیام به ربات بفرستید تا در همان ساعت پست منتشر شود.",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text("⏰ لطفاً ساعت انتشار را بفرستید (مثلاً `21:30`):", parse_mode="Markdown")
 
 def main():
     application = ApplicationBuilder().token(TOKEN).build()
-    
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("done", done_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.PHOTO | (filters.TEXT & (~filters.COMMAND)), handle_message))
     
-    print("🤖 ربات با موفقیت روشن شد و آماده به کار است...")
     application.run_polling()
 
 if __name__ == '__main__':
