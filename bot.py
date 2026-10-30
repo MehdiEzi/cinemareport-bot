@@ -1,6 +1,5 @@
 import os
 import threading
-from datetime import datetime, timedelta
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,7 +11,7 @@ from telegram.ext import (
     filters,
 )
 
-# ۱. راه‌اندازی سرور Flask برای پورت رندر (Web Service)
+# ۱. راه‌اندازی سرور Flask برای پورت رندر
 app = Flask(__name__)
 
 @app.route('/')
@@ -23,40 +22,43 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# تنظیمات اصلی
 TOKEN = "9207120214:AAH7jBlm1ojESyUeWr2PUdTjOtT4_U2da6k"
-CHANNEL_USERNAME = "@cinamareport"  # آیدی کانال شما
+CHANNEL_USERNAME = "@cinamareport"
 
-# دیکشنری موقت برای ذخیره اطلاعات پست در حال ساخت برای هر ادمین
+# ذخیره موقت پست‌ها برای ادمین
 user_drafts = {}
 
-# دستور شروع
-async def start(command_update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await command_update.message.reply_text(
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
         "🎬 **سلام مدیر عزیز!**\n\n"
-        "برای ساخت پست جدید، اطلاعات رو به این شکل بفرست:\n\n"
-        "نام فیلم یا سریال (به همراه سال)\n"
-        "1080: لینک کیفیت ۱۰۸۰\n"
-        "720: لینک کیفیت ۷۲۰\n\n"
-        "یا به صورت لینک‌های خط به خط بفرست تا ربات هوشمندانه تشخیص بده.",
+        "برای ساخت پست، **پوستر فیلم (عکس)** رو به همراه متن اطلاعات و لینک‌های دانلود در کپشنِ همون عکس برای ربات بفرست تا دقیقاً برات پست حرفه‌ای رو بسازه! ✨",
         parse_mode="Markdown"
     )
 
-# دریافت اطلاعات از ادمین
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# دریافت عکس (پوستر) و متن از ادمین
+async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    user_text = update.message.text.strip()
-    lines = user_text.split('\n')
     
+    # گرفتن فایل آیدی پوستر (اگر عکس فرستاده باشد)
+    photo_file_id = None
+    if update.message.photo:
+        photo_file_id = update.message.photo[-1].file_id
+
+    # گرفتن متن یا کپشن ارسال شده توسط شما
+    user_text = update.message.caption or update.message.text
+    
+    if not user_text:
+        await update.message.reply_text("❌ لطفا همراه با پوستر، اطلاعات فیلم و لینک‌ها رو هم بفرستید.")
+        return
+
+    lines = [line.strip() for line in user_text.split('\n') if line.strip()]
     title_input = lines[0] if lines else "عنوان نامشخص"
     
-    # استخراج لینک‌ها فقط بر اساس ورودی‌های خودتان
+    # استخراج لینک‌های دانلود از متن ارسالی شما
     download_links = {}
     for line in lines[1:]:
-        line = line.strip()
         lower_line = line.lower()
         if "1080" in lower_line or "full hd" in lower_line:
-            # پاک کردن برچسب از ابتدای لینک اگر کاربر نوشته باشد
             clean_link = line.split(":")[-1].strip() if ":" in line else line
             download_links["1080p"] = clean_link
         elif "720" in lower_line:
@@ -79,7 +81,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     header_emoji = "📺" if is_series else "🎬"
     tag = "#سریال" if is_series else "#فیلم"
 
-    # ساخت قالب نهایی با بولدسازی دقیق کلمات کلیدی و تفکیک بخش‌ها
+    # ساخت قالب حرفه‌ای با تفکیک دقیق بخش‌ها و بولدسازی کلمات کلیدی
     post_text = (
         f"{header_emoji} **CinamaReport | معرفی {media_type}**\n"
         f"━━━━━━━━━━━━━━\n"
@@ -104,54 +106,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"معرفی فیلم و سریال بدون اسپویل 🍿"
     )
 
-    # ذخیره در حافظه موقت ادمین برای زمان‌بندی
+    # ذخیره در حافظه موقت همراه با عکس
     user_drafts[user_id] = {
+        "photo": photo_file_id,
         "text": post_text,
         "links": download_links
     }
 
-    # دکمه‌های شیشه‌ای برای انتشار فوری یا زمان‌بندی
-    keyboard = [
-        [
-            InlineKeyboardButton("🚀 انتشار همین الان", callback_data="pub_now"),
-            InlineKeyboardButton("⏰ تنظیم زمان انتشار", callback_data="pub_later")
-        ]
-    ]
+    # ساخت دکمه‌های شیشه‌ای دانلود
+    keyboard = []
+    for quality, link in download_links.items():
+        keyboard.append([InlineKeyboardButton(f"📥 دانلود کیفیت {quality}", url=link)])
+    
+    # دکمه‌های مدیریت انتشار
+    keyboard.append([
+        InlineKeyboardButton("🚀 انتشار همین الان در کانال", callback_data="pub_now"),
+        InlineKeyboardButton("⏰ تنظیم زمان انتشار", callback_data="pub_later")
+    ])
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # پیش‌نمایش پست برای خودتان همراه با دکمه‌های مدیریت انتشار
-    preview_caption = "📌 **پیش‌نمایش پست ساخته‌شده:**\n(برای انتشار در کانال یکی از گزینه‌های زیر را انتخاب کنید)\n\n-------------------\n\n" + post_text
-    
-    # ساخت دکمه‌های دانلود برای پیش‌نمایش
-    dl_keyboard = []
-    for quality, link in download_links.items():
-        dl_keyboard.append([InlineKeyboardButton(f"📥 دانلود کیفیت {quality}", url=link)])
-    
-    # ترکیب دکمه‌های دانلود و دکمه‌های انتشار
-    for row in dl_keyboard:
-        keyboard.insert(0, row)
+    # ارسال پیش‌نمایش به خود شما (همراه با عکس و متن)
+    if photo_file_id:
+        await update.message.reply_photo(
+            photo=photo_file_id,
+            caption="📌 **پیش‌نمایش پست با پوستر:**\n\n" + post_text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(
+            text="📌 **پیش‌نمایش پست (بدون پوستر):**\n\n" + post_text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
 
-    await update.message.reply_text(
-        text=preview_caption,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# مدیریت دکمه‌های شیشه‌ای (انتشار فوری یا زمان‌بندی)
+# مدیریت کلیدهای انتشار
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     
     if user_id not in user_drafts:
-        await query.edit_message_text("❌ اطلاعات پست منقضی شده است. لطفا دوباره متن فیلم را بفرستید.")
+        await query.edit_message_text("❌ اطلاعات پست منقضی شده است. لطفا دوباره پوستر و اطلاعات را بفرستید.")
         return
 
     draft = user_drafts[user_id]
+    photo_file_id = draft["photo"]
     post_text = draft["text"]
     download_links = draft["links"]
 
-    # ساخت دکمه‌های شیشه‌ای دانلود برای کانال اصلی
+    # ساخت دکمه‌های شیشه‌ای برای کانال
     keyboard = []
     for quality, link in download_links.items():
         keyboard.append([InlineKeyboardButton(f"📥 دانلود کیفیت {quality}", url=link)])
@@ -159,31 +164,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
     if query.data == "pub_now":
-        # ارسال مستقیم به کانال
-        await context.bot.send_message(
-            chat_id=CHANNEL_USERNAME,
-            text=post_text,
-            parse_mode="Markdown",
-            reply_markup=reply_markup
-        )
-        await query.edit_message_text("✅ پست با موفقیت همین الان در کانال @cinamareport منتشر شد! 🎉")
+        if photo_file_id:
+            await context.bot.send_photo(
+                chat_id=CHANNEL_USERNAME,
+                photo=photo_file_id,
+                caption=post_text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=CHANNEL_USERNAME,
+                text=post_text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        await query.edit_message_text("✅ پست همراه با پوستر با موفقیت در کانال @cinamareport منتشر شد! 🎉")
         
     elif query.data == "pub_later":
-        # برای زمان‌بندی سفارشی (مثلا تست انتشار بعد از 1 دقیقه یا ساعت دلخواه)
-        # در اینجا به صورت پیش‌فرض برای کاربر پیام راهنما می‌فرستیم
-        await query.edit_message_text(
-            "⏰ **سیستم زمان‌بندی:**\n"
-            "لطفا ساعت انتشار را به فرمت `HH:MM` (مثلا `21:30`) در پاسخ بفرستید تا ربات در همان ساعت پست را در کانال قرار دهد."
-        )
+        await query.edit_message_text("⏰ بخش زمان‌بندی فعال شد. لطفا ساعت انتشار را بفرستید.")
 
 def main():
     application = ApplicationBuilder().token(TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    # پذیرش عکس همراه با کپشن یا متن ساده
+    application.add_handler(MessageHandler(filters.PHOTO | (filters.TEXT & (~filters.COMMAND)), handle_media_message))
     
-    print("🤖 ربات Cinema Report با قابلیت مدیریت انتشار و قالب حرفه‌ای روشن شد...")
+    print("🤖 ربات با قابلیت دریافت پوستر و انتشار حرفه‌ای روشن شد...")
     application.run_polling()
 
 if __name__ == '__main__':
