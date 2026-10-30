@@ -1,10 +1,12 @@
 import os
 import threading
+import requests
+from bs4 import BeautifulSoup
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# ۱. راه‌اندازی سرور Flask برای رفع خطای پورت در Render (Web Service)
+# ۱. راه‌اندازی سرور Flask برای پورت رندر
 app = Flask(__name__)
 
 @app.route('/')
@@ -15,63 +17,109 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# ۲. توکن ربات شما
 TOKEN = "9207120214:AAH7jBlm1ojESyUeWr2PUdTjOtT4_U2da6k"
 
-# ۳. تابع ساخت دکمه‌های شیشه‌ای برای لینک‌های دانلود
-def get_download_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("📥 دانلود کیفیت 1080p Full HD", url="https://t.me/cinamareport")],
-        [InlineKeyboardButton("📥 دانلود کیفیت 720p", url="https://t.me/cinamareport")],
-        [InlineKeyboardButton("📥 دانلود کیفیت 480p", url="https://t.me/cinamareport")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+# تابع استخراج هوشمند لینک‌ها از صفحه وب
+def extract_links_from_webpage(url):
+    download_links = {}
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                text = a_tag.get_text().lower()
+                
+                # جستجوی هوشمند کیفیت‌ها در لینک‌ها یا متن دکمه‌های سایت مقصد
+                if '1080' in text or '1080' in href:
+                    download_links['1080p'] = href
+                elif '720' in text or '720' in href:
+                    download_links['720p'] = href
+                elif '480' in text or '480' in href:
+                    download_links['480p'] = href
+    except Exception as e:
+        print(f"Scraping error: {e}")
+    return download_links
 
-# ۴. پردازنده پیام‌های دریافتی (قالب استاندارد CinemaReport)
+# پردازنده پیام‌ها
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
+    user_text = update.message.text.strip()
+    lines = user_text.split('\n')
     
-    # نمونه قالب ثابت و حرفه‌ای که تایید کرده بودید
+    title_input = lines[0] if lines else "عنوان نامشخص"
+    download_links = {}
+    
+    # بررسی خطوط بعدی برای یافتن لینک صفحه وب یا لینک‌های مستقیم
+    for line in lines[1:]:
+        line = line.strip()
+        if line.startswith("http"):
+            # اگر کاربر لینک صفحه سایت را داده باشد، تلاش می‌کنیم لینک‌ها را استخراج کنیم
+            scraped = extract_links_from_webpage(line)
+            if scraped:
+                download_links.update(scraped)
+            else:
+                # اگر اسکرپ نشد یا لینک مستقیم بود، دستی دسته‌بندی می‌کنیم
+                if "1080" in line:
+                    download_links["1080p"] = line
+                elif "720" in line:
+                    download_links["720p"] = line
+                elif "480" in line:
+                    download_links["480p"] = line
+                else:
+                    if "1080p" not in download_links:
+                        download_links["1080p"] = line
+                    elif "720p" not in download_links:
+                        download_links["720p"] = line
+
+    # تشخیص هوشمند فیلم یا سریال
+    is_series = "سریال" in title_input or "season" in title_input.lower() or "فصل" in title_input
+    media_type = "سریال" if is_series else "فیلم"
+    header_emoji = "📺" if is_series else "🎬"
+    tag = "#سریال" if is_series else "#فیلم"
+
+    # قالب استاندارد کانال
     post_text = (
-        "🎬 **CinamaReport | معرفی فیلم**\n"
-        "━━━━━━━━━━━━━━\n"
-        "#فیلم | Revolutionary Road (2008)\n"
-        "⭐ IMDb: 7.3/10\n"
-        "🍅 Rotten Tomatoes: 67% (منتقدان) | 70% (مخاطبان)\n"
-        "🎭 ژانر: درام | عاشقانه\n"
-        "🌍 محصول: آمریکا | بریتانیا\n"
-        "🎬 کارگردان: سام مندس\n"
-        "👤 بازیگران: لئوناردو دیکاپریو | کیت وینسلت\n"
-        "📝 معرفی:\n"
-        "اگه فکر می‌کنی زندگی مشترک قراره همیشه توی چرخ‌دنده‌های روزمرگی و تکرار گم بشه، این فیلم مثل یک سیلی محکم آدم رو بیدار میکنه!\n"
-        "داستان زوج جوانی که در حومه شهر زندگی آرامی دارند اما زیر پوست این ظاهر، از روزمرگی خفه شدن و تلاش می‌کنن رویاهاشون رو نجات بدن.\n"
-        "بازی دیکاپریو و وینسلت طوریه که انگار دارن دعواهای واقعی زن و شوهرها رو روی پرده میارن. تماشای این فیلم یه تراپیِ تلخ ولی کاملاً الزامیه! ❤️‍🩹\n"
-        "━━━━━━━━━━━━━━\n"
-        "🎥 @cinamareport \n"
-        "معرفی فیلم و سریال بدون اسپویل 🍿"
+        f"{header_emoji} **CinamaReport | معرفی {media_type}**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"{tag} | {title_input}\n"
+        f"⭐ IMDb: 7.5/10\n"
+        f"🍅 Rotten Tomatoes: ۷۵٪ (منتقدان) | ۸۰٪ (مخاطبان)\n"
+        f"🎭 ژانر: درام | رازآلود\n"
+        f"🌍 محصول: آمریکا\n"
+        f"🎬 کارگردان / سازنده: مشخصات اثر\n"
+        f"📝 معرفی:\n"
+        f"گاهی مسیر داستان طوری پیش می‌ره که تا آخرین لحظه نمی‌تونی حدس بزنی چه اتفاقی قراره بیفته...\n"
+        f"این اثر با فضاسازی فوق‌العاده و قصه‌ای که داره، قشنگ تو رو تا تهش با خودش همراه می‌کنه. اگر دنبال یه تجربه‌ی خاص و متفاوت هستی، حتماً وقت بذار و تماشاش کن! ✨\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🎥 @cinamareport \n"
+        f"معرفی فیلم و سریال بدون اسپویل 🍿"
     )
 
-    # ارسال پست همراه با دکمه‌های شیشه‌ای
+    # ساخت دکمه‌های شیشه‌ای
+    keyboard = []
+    if download_links:
+        for quality, link in download_links.items():
+            keyboard.append([InlineKeyboardButton(f"📥 دانلود کیفیت {quality}", url=link)])
+    else:
+        keyboard.append([InlineKeyboardButton("📥 دانلود رایگان با زیرنویس فارسی", url="https://t.me/cinamareport")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
         text=post_text,
         parse_mode="Markdown",
-        reply_markup=get_download_keyboard()
+        reply_markup=reply_markup
     )
 
-# ۵. تابع اصلی اجرای ربات تلگرام
 def main():
     application = ApplicationBuilder().token(TOKEN).build()
-    
-    # اضافه کردن هندلر برای دریافت متن‌ها یا لینک‌ها از شما
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
-    print("🤖 ربات Cinema Report با موفقیت روشن شد و آماده به کار است...")
+    print("🤖 ربات Cinema Report با قابلیت استخراج لینک فعال شد...")
     application.run_polling()
 
 if __name__ == '__main__':
-    # اجرای وب‌سایت Flask در یک ترد (Thread) جداگانه برای رندر
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.start()
-    
-    # اجرای ربات تلگرام
     main()
