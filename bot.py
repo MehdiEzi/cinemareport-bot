@@ -44,9 +44,9 @@ if not TOKEN:
 
 CHANNEL = os.environ.get("CHANNEL_USERNAME", "@cinamareport")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 # مدل جایگزین، اگر مدل اصلی خطا داد (اختیاری)
-GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "")
+GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.8-flash")
 # شناسه‌ی عددی ادمین‌ها، با کاما جدا شود. اگر خالی باشد همه می‌توانند از ربات استفاده کنند!
 ADMIN_IDS = {
     int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip().isdigit()
@@ -305,19 +305,24 @@ def generate_ai_info(title, year, is_series):
         models.append(GEMINI_FALLBACK_MODEL)
 
     last_err = "خطای نامشخص از Gemini."
+    deadline = time.monotonic() + 90  # حداکثر زمان کل انتظار برای Gemini
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for attempt in range(4):
+        for attempt in range(3):
+            if time.monotonic() > deadline:
+                break
             try:
                 r = requests.post(
                     url,
                     headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
                     json=body,
-                    timeout=60,
+                    timeout=25,
                 )
             except requests.RequestException as e:
-                log.warning("Gemini network error (%s), attempt %d", type(e).__name__, attempt + 1)
-                last_err = "ارتباط با Gemini برقرار نشد."
+                log.warning("Gemini network error (%s), model %s", type(e).__name__, model)
+                last_err = "Gemini جواب نداد (کند یا شلوغ است)."
+                if isinstance(e, requests.Timeout):
+                    break  # مدل کند است؛ فوراً سراغ مدل بعدی
                 time.sleep(3 * (attempt + 1))
                 continue
 
