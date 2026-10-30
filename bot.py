@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import threading
+import time
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
@@ -43,7 +44,9 @@ if not TOKEN:
 
 CHANNEL = os.environ.get("CHANNEL_USERNAME", "@cinamareport")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+# مدل جایگزین، اگر مدل اصلی خطا داد (اختیاری)
+GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "")
 # شناسه‌ی عددی ادمین‌ها، با کاما جدا شود. اگر خالی باشد همه می‌توانند از ربات استفاده کنند!
 ADMIN_IDS = {
     int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip().isdigit()
@@ -293,31 +296,56 @@ def generate_ai_info(title, year, is_series):
         "اگر درباره‌ی مقداری مطمئن نیستی، مقدارش را «نامشخص» بنویس و عدد یا نام حدسی ننویس. "
         "متن‌ها کوتاه باشند."
     )
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7},
     }
-    try:
-        r = requests.post(
-            url,
-            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-            json=body,
-            timeout=60,
-        )
-        if r.status_code != 200:
-            log.error("Gemini HTTP %s: %s", r.status_code, r.text[:300])
-            return None, f"خطای Gemini (کد {r.status_code}). نام مدل یا کلید را چک کن."
-        parts = r.json()["candidates"][0]["content"]["parts"]
-        text = "".join(p.get("text", "") for p in parts).strip()
-        text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.M).strip()
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            return None, "پاسخ Gemini قابل‌استفاده نبود."
-        return data, None
-    except Exception as e:  # noqa: BLE001
-        log.exception("Gemini failed")
-        return None, f"خطا در دریافت اطلاعات از Gemini ({type(e).__name__})."
+    models = [GEMINI_MODEL]
+    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
+        models.append(GEMINI_FALLBACK_MODEL)
+
+    last_err = "خطای نامشخص از Gemini."
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        for attempt in range(4):
+            try:
+                r = requests.post(
+                    url,
+                    headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                    json=body,
+                    timeout=60,
+                )
+            except requests.RequestException as e:
+                log.warning("Gemini network error (%s), attempt %d", type(e).__name__, attempt + 1)
+                last_err = "ارتباط با Gemini برقرار نشد."
+                time.sleep(3 * (attempt + 1))
+                continue
+
+            if r.status_code in (429, 500, 502, 503, 504):
+                # شلوغی یا خطای موقت سرور؛ کمی صبر و تلاش دوباره
+                log.warning("Gemini HTTP %s (%s), attempt %d", r.status_code, model, attempt + 1)
+                last_err = f"Gemini شلوغ است (کد {r.status_code})."
+                time.sleep(3 * (attempt + 1))
+                continue
+            if r.status_code != 200:
+                log.error("Gemini HTTP %s (%s): %s", r.status_code, model, r.text[:300])
+                last_err = f"خطای Gemini (کد {r.status_code}). نام مدل یا کلید را چک کن."
+                break  # سراغ مدل بعدی
+
+            try:
+                parts = r.json()["candidates"][0]["content"]["parts"]
+                text = "".join(p.get("text", "") for p in parts).strip()
+                text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.M).strip()
+                data = json.loads(text)
+            except Exception as e:  # noqa: BLE001
+                log.exception("Gemini parse failed")
+                last_err = f"پاسخ Gemini قابل‌خواندن نبود ({type(e).__name__})."
+                continue
+            if isinstance(data, dict):
+                return data, None
+            last_err = "پاسخ Gemini قابل‌استفاده نبود."
+
+    return None, last_err
 
 
 # ───────────────────────── ساخت متن پست ─────────────────────────
