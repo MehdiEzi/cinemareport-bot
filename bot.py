@@ -35,20 +35,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_sessions[user_id] = {"texts": [], "photo": None}
     await update.message.reply_text(
         "🎬 *سلام مدیر عزیز!*\n\n"
-        "برای سریال‌های طولانی:\n"
+        "برای ساخت پست (به‌خصوص سریال‌های طولانی):\n"
         "۱. ابتدا **پوستر سریال** رو به همراه نام سریال در کپشن بفرست.\n"
-        "۲. سپس لینک‌های فصل‌ها و کیفیت‌ها رو در **چند پیام پیاپی** بفرست.\n"
-        "۳. در نهایت کلمه `/done` رو بفرست تا ربات کل پست رو با دکمه‌های تفکیک‌شده آماده کنه! 🍿",
+        "۲. لینک‌های فصل‌ها و کیفیت‌ها رو در **چند پیام پیاپی** بفرست.\n"
+        "۳. در انتهای پیام آخر، عبارت **«پست رو آماده کن»** رو بنویس تا ربات فوراً پست رو برات بسازه! 🍿",
         parse_mode="Markdown"
     )
 
-# دستور برای پایان جمع‌آوری لینک‌ها و ساخت پست نهایی سریال
-async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id not in user_sessions or not user_sessions[user_id]["texts"]:
-        await update.message.reply_text("❌ هیچ اطلاعاتی ثبت نشده است. ابتدا پوستر و لینک‌ها را بفرستید.")
-        return
-
+# تابع پردازش نهایی و ساخت پست
+async def generate_post(update, context, user_id):
     session = user_sessions[user_id]
     all_text = "\n".join(session["texts"])
     photo_file_id = session["photo"]
@@ -61,6 +56,10 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_label = "لینک دانلود"
 
     for line in lines[1:]:
+        # اگر کاربر عبارت اتمام را نوشته بود، در لینک‌ها لحاظ نکنیم
+        if "پست رو آماده کن" in line:
+            continue
+
         lower_line = line.lower()
         link = ""
         if "http" in line:
@@ -68,20 +67,14 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             link = "http" + parts[1].strip().split()[0]
 
         if not link:
-            # اگر لینک نبود، این خط عنوان فصل یا کیفیت است (مثل "فصل اول کیفیت 1080")
             current_label = line
             continue
 
-        # استخراج شماره قسمت (مثلا E01) از لینک یا متن برای نام دکمه
-        ep_name = "قسمت نامشخص"
+        ep_name = "لینک دانلود"
         for part in link.split('/'):
             if 'e' in part.lower() and any(char.isdigit() for char in part):
                 ep_name = part.split('.')[-1] if '.' in part else part
                 break
-        
-        # اگر در لینک پیدا نشد، از روی متن حدس می‌زنیم
-        if ep_name == "قسمت نامشخص":
-            ep_name = "لینک دانلود"
 
         button_text = f"📥 {current_label} ({ep_name})"
         keyboard.append([InlineKeyboardButton(button_text, url=link)])
@@ -121,20 +114,19 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "waiting_for_time": False
     }
 
-    # پاکسازی سشن موقت
     del user_sessions[user_id]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     if photo_file_id:
         await update.message.reply_photo(
             photo=photo_file_id,
-            caption="📌 *پیش‌نمایش پست سریال:*\n\n" + post_text,
+            caption="📌 *پیش‌نمایش پست سریال آماده شد:*\n\n" + post_text,
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
     else:
         await update.message.reply_text(
-            text="📌 *پیش‌نمایش پست سریال:*\n\n" + post_text,
+            text="📌 *پیش‌نمایش پست سریال آماده شد:*\n\n" + post_text,
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
@@ -147,7 +139,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user_text:
             return
 
-        # اگر کاربر در حال تنظیم ساعت زمان‌بندی بود
+        # بررسی تنظیم ساعت زمان‌بندی
         if user_id in user_drafts and user_drafts[user_id].get("waiting_for_time"):
             time_str = user_text.strip()
             try:
@@ -165,7 +157,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ فرمت ساعت نامعتبر است (مثال: 21:30)")
                 return
 
-        # سیستم جمع‌آوری پیام‌های چندگانه سریال
         if user_id not in user_sessions:
             user_sessions[user_id] = {"texts": [], "photo": None}
 
@@ -173,11 +164,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_sessions[user_id]["photo"] = update.message.photo[-1].file_id
 
         user_sessions[user_id]["texts"].append(user_text)
-        
-        await update.message.reply_text(
-            "📥 بخش از اطلاعات دریافت شد.\n"
-            "اگر لینک دیگری دارید بفرستید، و وقتی تمام شد کلمه `/done` را ارسال کنید تا پیش‌نمایش پست را تحویل بگیرید."
-        )
+
+        # بررسی اینکه آیا کاربر دستور اتمام را فرستاده است یا خیر
+        if "پست رو آماده کن" in user_text:
+            await generate_post(update, context, user_id)
+        else:
+            await update.message.reply_text(
+                "📥 بخش اطلاعات دریافت شد.\n"
+                "اگر لینک دیگری دارید بفرستید، و در آخرین پیام عبارت «پست رو آماده کن» را بنویسید."
+            )
     except Exception as e:
         await update.message.reply_text(f"خطا: {e}")
 
@@ -213,7 +208,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = ApplicationBuilder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("done", done_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.PHOTO | (filters.TEXT & (~filters.COMMAND)), handle_message))
     
