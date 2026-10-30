@@ -28,26 +28,21 @@ CHANNEL_USERNAME = "@cinamareport"
 user_drafts = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("-> دستور /start اجرا شد.")
     await update.message.reply_text(
         "🎬 **سلام مدیر عزیز!**\n\n"
-        "ربات آماده دریافت اطلاعات و پوستر فیلم است.",
+        "پوستر فیلم رو به همراه متن اطلاعات و لینک‌ها بفرست تا پست آماده بشه.",
         parse_mode="Markdown"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("-> پیامی از کاربر دریافت شد!")
     try:
         user_id = update.message.from_user.id
         
         photo_file_id = None
         if update.message.photo:
             photo_file_id = update.message.photo[-1].file_id
-            print(f"-> عکس دریافت شد. File ID: {photo_file_id}")
 
         user_text = update.message.caption or update.message.text
-        print(f"-> متن دریافتی: {user_text}")
-
         if not user_text:
             await update.message.reply_text("❌ لطفا متن اطلاعات فیلم را همراه با پوستر بفرستید.")
             return
@@ -55,27 +50,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [line.strip() for line in user_text.split('\n') if line.strip()]
         title_input = lines[0] if lines else "عنوان نامشخص"
         
+        # استخراج دقیق لینک‌ها بدون خراب شدن https://
         download_links = {}
         for line in lines[1:]:
             lower_line = line.lower()
-            if "1080" in lower_line:
-                clean_link = line.split(":")[-1].strip() if ":" in line else line
-                download_links["1080p"] = clean_link
-            elif "720" in lower_line:
-                clean_link = line.split(":")[-1].strip() if ":" in line else line
-                download_links["720p"] = clean_link
-            elif "480" in lower_line:
-                clean_link = line.split(":")[-1].strip() if ":" in line else line
-                download_links["480p"] = clean_link
-            elif line.startswith("http"):
-                if "1080p" not in download_links:
-                    download_links["1080p"] = line
-                elif "720p" not in download_links:
-                    download_links["720p"] = line
-                elif "480p" not in download_links:
-                    download_links["480p"] = line
+            
+            # پیدا کردن لینک صحیح در خط
+            link = ""
+            if "http" in line:
+                # استخراج بخش بعد از اولین کلیدواژه یا جدا کردن با اسپیس/دوهفته
+                parts = line.split("http", 1)
+                link = "http" + parts[1].strip().split()[0]
 
-        print(f"-> لینک‌های استخراج‌شده: {download_links}")
+            if not link:
+                continue
+
+            if "1080" in lower_line:
+                download_links["1080p"] = link
+            elif "720" in lower_line:
+                download_links["720p"] = link
+            elif "480" in lower_line:
+                download_links["480p"] = link
+            else:
+                if "1080p" not in download_links:
+                    download_links["1080p"] = link
+                elif "720p" not in download_links:
+                    download_links["720p"] = link
+                elif "480p" not in download_links:
+                    download_links["480p"] = link
 
         is_series = "سریال" in title_input or "season" in title_input.lower() or "فصل" in title_input
         media_type = "سریال" if is_series else "فیلم"
@@ -136,10 +138,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
-        print("-> پیش‌نمایش با موفقیت برای ادمین ارسال شد.")
     except Exception as e:
-        print(f"!!! خطا در پردازش پیام: {e}")
-        await update.message.reply_text(f"خطای سیستمی: {e}")
+        await update.message.reply_text(f"خطا در پردازش: {e}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -186,7 +186,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.PHOTO | (filters.TEXT & (~filters.COMMAND)), handle_message))
     
-    print("🤖 ربات با موفقیت روشن شد و در حال گوش دادن است...")
+    print("🤖 ربات با موفقیت روشن شد و آماده به کار است...")
     application.run_polling()
 
 if __name__ == '__main__':
