@@ -87,6 +87,9 @@ LABEL_QUALITY_RE = re.compile(r"(2160|1080|720|480|360)")
 PREFIX_RE = re.compile(r"^\[\d{1,2}/\d{1,2}/\d{2,4}[^\]]*\]\s*[^:]{1,40}:\s*")
 TRIGGER_RE = re.compile(r"پست\s*(?:رو|را)\s*آماده\s*کن")
 TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+# کلمه‌ی فعال‌کننده‌ی حالت «قسمت جدید» در خط عنوان
+UPDATE_RE = re.compile(r"(?:آپدیت|اپدیت|قسمت\s*جدید|\bupdate\b)", re.I)
+_FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
 SEASON_WORDS = {
     "اول": 1, "دوم": 2, "سوم": 3, "چهارم": 4, "پنجم": 5,
@@ -362,6 +365,19 @@ def visible_len(text: str) -> int:
     return len(html.unescape(re.sub(r"<[^>]+>", "", text)))
 
 
+def build_update_text(title, year, season, ep):
+    title_txt = esc(title) + (f" ({esc(year)})" if year else "")
+    headline = f"قسمت {ep} فصل {season} اضافه شد".translate(_FA_DIGITS)
+    return (
+        f"🆕 <b>CinamaReport | قسمت جدید</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"#سریال | <b>{title_txt}</b>\n\n"
+        f"📺 <b>{headline}</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🎥 @cinamareport"
+    )
+
+
 def build_post_text(info, title, year, is_series):
     def g(key):
         v = info.get(key)
@@ -447,16 +463,32 @@ async def build_and_preview(bot, user_id, chat_id):
             await bot.send_message(chat_id, "❌ هیچ لینکی پیدا نشد. دوباره بفرست.")
             return
 
-        title, year = split_title_year(parsed["title"])
+        raw_title = parsed["title"]
+        is_update = bool(UPDATE_RE.search(raw_title))
+        if is_update:
+            raw_title = UPDATE_RE.sub("", raw_title).strip(" -–|:،")
+            if not raw_title:
+                await bot.send_message(chat_id, "❌ اسم سریال کنار کلمه‌ی «آپدیت» پیدا نشد. مثال: The Leftovers آپدیت")
+                return
+        title, year = split_title_year(raw_title)
         is_series = parsed["is_series"]
         warnings = list(parsed["warnings"])
 
-        await bot.send_message(chat_id, "🤖 در حال نوشتن معرفی...")
-        info, ai_err = await asyncio.to_thread(generate_ai_info, title, year, is_series)
-        if ai_err:
-            warnings.append(f"⚠️ {ai_err} اطلاعات به‌صورت «نامشخص» پر شد؛ پیشنهاد می‌کنم لغو کنی و دوباره بفرستی.")
-
-        text = build_post_text(info or {}, title, year, is_series)
+        if is_update:
+            if not is_series:
+                await bot.send_message(
+                    chat_id,
+                    "❌ برای پست قسمت جدید، لینک‌ها باید شماره‌ی فصل و قسمت داشته باشند (مثل S03E06 توی اسم فایل).",
+                )
+                return
+            latest = max(parsed["entries"], key=lambda e: (e["season"] or 0, e["ep"] or 0))
+            text = build_update_text(title, year, latest["season"], latest["ep"])
+        else:
+            await bot.send_message(chat_id, "🤖 در حال نوشتن معرفی...")
+            info, ai_err = await asyncio.to_thread(generate_ai_info, title, year, is_series)
+            if ai_err:
+                warnings.append(f"⚠️ {ai_err} اطلاعات به‌صورت «نامشخص» پر شد؛ پیشنهاد می‌کنم لغو کنی و دوباره بفرستی.")
+            text = build_post_text(info or {}, title, year, is_series)
         rows = build_link_rows(parsed["entries"], is_series)
 
         n_buttons = sum(len(r) for r in rows)
@@ -530,6 +562,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "۲. لینک‌ها را در یک یا چند پیام بفرست (برچسب فصل/کیفیت بالای هر دسته).\n"
         f"۳. {WAIT_SECONDS} ثانیه بعد از آخرین پیام، ربات خودش پست را می‌سازد. "
         "برای سریع‌تر شدن می‌توانی بنویسی «پست رو آماده کن» یا /done را بزنی.\n\n"
+        "🆕 <b>قسمت جدید سریال‌های هفتگی:</b> کنار اسم سریال کلمه‌ی «آپدیت» بنویس "
+        "(مثلاً <code>The Leftovers آپدیت</code>) و لینک‌ها را بفرست؛ بدون معرفی، فقط تیتر قسمت جدید و دکمه‌ها.\n\n"
         "/cancel برای پاک کردن ورودی‌های نیمه‌کاره.\n"
         f"شناسه‌ی عددی شما: <code>{uid}</code>",
         parse_mode=ParseMode.HTML,
