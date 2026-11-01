@@ -811,9 +811,17 @@ def main():
     application.add_handler(
         MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), handle_message)
     )
+
+    # ابزار ساخت پست اینستاگرام (دستور /insta). اگر خطا بدهد، بقیه‌ی ربات عادی کار می‌کند.
+    try:
+        import insta
+        insta.register(application)
+        log.info("Instagram tool loaded.")
+    except Exception:
+        log.exception("insta module disabled")
+
     log.info("Bot started.")
     application.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
