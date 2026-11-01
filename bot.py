@@ -230,8 +230,44 @@ def admin_rows():
             InlineKeyboardButton("🚀 انتشار همین الان", callback_data="pub_now"),
             InlineKeyboardButton("⏰ تنظیم زمان", callback_data="pub_later"),
         ],
-        [InlineKeyboardButton("🗑 لغو", callback_data="pub_cancel")],
+        [
+            InlineKeyboardButton("✏️ ویرایش", callback_data="edit_menu"),
+            InlineKeyboardButton("🗑 لغو", callback_data="pub_cancel"),
+        ],
     ]
+
+
+FULL_FIELDS = [
+    ("title", "عنوان"), ("imdb", "IMDb"), ("rt", "Rotten Tomatoes"),
+    ("genre", "ژانر"), ("country", "محصول"), ("director", "کارگردان"),
+    ("cast", "بازیگران"), ("duration", "مدت / وضعیت"),
+    ("summary", "خلاصه داستان"), ("why", "چرا ارزش دیدن"),
+]
+UPDATE_FIELDS = [("title", "عنوان"), ("headline", "تیتر قسمت")]
+EDIT_TIMEOUT = 600  # ثانیه؛ بعد از این مدت، حالت ویرایش خودکار لغو می‌شود
+
+
+def fields_for(draft):
+    return UPDATE_FIELDS if draft["kind"] == "update" else FULL_FIELDS
+
+
+def edit_menu_markup(draft):
+    buttons = [InlineKeyboardButton(label, callback_data=f"edit_f:{key}") for key, label in fields_for(draft)]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton("↩️ بازگشت به پیش‌نمایش", callback_data="edit_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def current_value(draft, key):
+    d = draft["data"]
+    if key == "title":
+        return d["title"] + (f" {d['year']}" if d.get("year") else "")
+    if key == "headline":
+        return d.get("headline") or default_headline(d["season"], d["ep"])
+    val = d["info"].get(key)
+    if isinstance(val, list):
+        val = " ".join(str(x) for x in val)
+    return str(val) if val else "نامشخص"
 
 
 # ───────────────────────── Telegraph ─────────────────────────
@@ -294,8 +330,9 @@ def generate_ai_info(title, year, is_series):
         "- cast: ۲ یا ۳ بازیگر اصلی\n"
         "- duration: مدت زمان فیلم، یا برای سریال تعداد فصل‌ها و وضعیت پخش\n"
         "- summary: خلاصه‌ی داستان بدون اسپویل، حداکثر ۲ جمله‌ی کوتاه\n"
-        "- why: آرایه‌ای از دقیقاً ۳ جمله‌ی کوتاه (هرکدام حداکثر ۱۵ کلمه) درباره‌ی اینکه چرا ارزش دیدن دارد، "
-        "با لحن صمیمی و خودمونی\n"
+        "- why: یک پاراگراف جذاب و روان (۳ تا ۴ جمله، حداکثر ۵۰ کلمه) درباره‌ی اینکه چرا ارزش دیدن دارد؛ "
+        "بدون بولت و بدون اسپویل، با لحن صمیمی و خودمونی، طوری که مخاطب را کنجکاو کند. "
+        "مقدارش یک رشته‌ی متنی باشد، نه آرایه\n"
         "اگر درباره‌ی مقداری مطمئن نیستی، مقدارش را «نامشخص» بنویس و عدد یا نام حدسی ننویس. "
         "متن‌ها کوتاه باشند."
     )
@@ -365,9 +402,13 @@ def visible_len(text: str) -> int:
     return len(html.unescape(re.sub(r"<[^>]+>", "", text)))
 
 
-def build_update_text(title, year, season, ep):
+def default_headline(season, ep):
+    return f"قسمت {ep} فصل {season} اضافه شد".translate(_FA_DIGITS)
+
+
+def build_update_text(title, year, season, ep, headline=None):
     title_txt = esc(title) + (f" ({esc(year)})" if year else "")
-    headline = f"قسمت {ep} فصل {season} اضافه شد".translate(_FA_DIGITS)
+    headline = esc(headline) if headline else default_headline(season, ep)
     return (
         f"🆕 <b>CinamaReport | قسمت جدید</b>\n"
         f"━━━━━━━━━━━━━━\n"
@@ -385,12 +426,8 @@ def build_post_text(info, title, year, is_series):
 
     why = info.get("why")
     if isinstance(why, list):
-        why_lines = [str(x).strip().lstrip("•-– ").strip() for x in why if str(x).strip()][:3]
-    elif isinstance(why, str) and why.strip():
-        why_lines = [why.strip()]
-    else:
-        why_lines = []
-    why_txt = "\n".join("• " + esc(x) for x in why_lines) if why_lines else "• نامشخص"
+        why = " ".join(str(x).strip().lstrip("•-– ").strip() for x in why if str(x).strip())
+    why_txt = esc(why) if why and str(why).strip() else "نامشخص"
 
     emoji = "📺" if is_series else "🎬"
     kind = "سریال" if is_series else "فیلم"
@@ -414,6 +451,16 @@ def build_post_text(info, title, year, is_series):
         f"🎥 @cinamareport\n"
         f"معرفی فیلم و سریال بدون اسپویل 🍿"
     )
+
+
+def render_draft(draft):
+    """متن پست را از روی داده‌های ذخیره‌شده دوباره می‌سازد (بعد از هر ویرایش)."""
+    d = draft["data"]
+    if draft["kind"] == "update":
+        draft["text"] = build_update_text(d["title"], d["year"], d["season"], d["ep"], d.get("headline"))
+    else:
+        draft["text"] = build_post_text(d["info"], d["title"], d["year"], d["is_series"])
+    draft["split"] = bool(draft["photo"]) and visible_len(draft["text"]) > CAPTION_LIMIT
 
 
 # ───────────────────────── ارسال پست ─────────────────────────
@@ -482,13 +529,15 @@ async def build_and_preview(bot, user_id, chat_id):
                 )
                 return
             latest = max(parsed["entries"], key=lambda e: (e["season"] or 0, e["ep"] or 0))
-            text = build_update_text(title, year, latest["season"], latest["ep"])
+            kind = "update"
+            data = {"title": title, "year": year, "season": latest["season"], "ep": latest["ep"], "headline": None}
         else:
             await bot.send_message(chat_id, "🤖 در حال نوشتن معرفی...")
             info, ai_err = await asyncio.to_thread(generate_ai_info, title, year, is_series)
             if ai_err:
                 warnings.append(f"⚠️ {ai_err} اطلاعات به‌صورت «نامشخص» پر شد؛ پیشنهاد می‌کنم لغو کنی و دوباره بفرستی.")
-            text = build_post_text(info or {}, title, year, is_series)
+            kind = "full"
+            data = {"title": title, "year": year, "is_series": is_series, "info": dict(info or {})}
         rows = build_link_rows(parsed["entries"], is_series)
 
         n_buttons = sum(len(r) for r in rows)
@@ -505,20 +554,22 @@ async def build_and_preview(bot, user_id, chat_id):
             rows = [[InlineKeyboardButton("📥 مشاهده‌ی همه‌ی لینک‌های دانلود", url=page_url)]]
             warnings.append("ℹ️ تعداد لینک‌ها زیاد بود؛ همه داخل یک صفحه‌ی Telegraph گذاشته شد.")
 
-        split = bool(session["photo"]) and visible_len(text) > CAPTION_LIMIT
-        if split:
-            warnings.append(
-                f"ℹ️ طول متن از {CAPTION_LIMIT} کاراکتر بیشتر شد؛ پست در دو پیام ارسال می‌شود "
-                f"(اول عکس، بعد متن و دکمه‌ها)."
-            )
-
         drafts[user_id] = {
             "photo": session["photo"],
-            "text": text,
+            "kind": kind,
+            "data": data,
             "link_rows": rows,
-            "split": split,
+            "text": "",
+            "split": False,
             "waiting_for_time": False,
+            "editing": None,
         }
+        render_draft(drafts[user_id])
+        if drafts[user_id]["split"]:
+            warnings.append(
+                f"ℹ️ طول متن از {CAPTION_LIMIT} کاراکتر بیشتر شد؛ پست در دو پیام ارسال می‌شود "
+                f"(اول عکس، بعد متن و دکمه‌ها). با دکمه‌ی ✏️ ویرایش می‌توانی بخش‌ها را کوتاه‌تر کنی."
+            )
 
         if warnings:
             await bot.send_message(chat_id, "\n".join(warnings))
@@ -527,6 +578,24 @@ async def build_and_preview(bot, user_id, chat_id):
     except Exception as e:  # noqa: BLE001
         log.exception("build_and_preview failed")
         await bot.send_message(chat_id, f"❌ خطا در ساخت پست: {e}")
+
+
+async def apply_edit(bot, chat_id, draft, value):
+    key = draft["editing"]
+    draft["editing"] = None
+    d = draft["data"]
+    if key == "title":
+        d["title"], d["year"] = split_title_year(value)
+    elif key == "headline":
+        d["headline"] = value
+    else:
+        d["info"][key] = value
+    render_draft(draft)
+    note = "✅ تغییر اعمال شد."
+    if draft["split"]:
+        note += f" (متن از {CAPTION_LIMIT} کاراکتر بیشتر است؛ پست در دو پیام ارسال می‌شود.)"
+    await bot.send_message(chat_id, note)
+    await send_post(bot, chat_id, draft, extra_rows=admin_rows())
 
 
 # ───────────────────────── تایمر پایان ورودی ─────────────────────────
@@ -555,6 +624,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     sessions.pop(uid, None)
     cancel_timer(context, uid)
+    if drafts.get(uid):
+        drafts[uid]["editing"] = None
     await update.message.reply_text(
         "🎬 <b>سلام مدیر عزیز!</b>\n\n"
         "۱. پوستر را همراه عنوان (خط اول کپشن) بفرست؛ مثلاً <code>The Leftovers</code> "
@@ -621,6 +692,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ورودی ساعت نبود؛ یعنی پست جدیدی شروع شده
         draft["waiting_for_time"] = False
 
+    # دریافت متن جدید برای ویرایش (فقط تا چند دقیقه؛ ارسال عکس یعنی پست جدید)
+    if draft and draft.get("editing"):
+        fresh = time.time() - draft.get("editing_at", 0) < EDIT_TIMEOUT
+        if msg.photo or not fresh:
+            draft["editing"] = None
+        elif msg.text and msg.text.strip():
+            await apply_edit(context.bot, chat_id, draft, msg.text.strip())
+            return
+        else:
+            return
+
     if not text and not msg.photo:
         return
 
@@ -669,6 +751,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     draft = drafts.get(uid)
     if not draft:
         await query.message.reply_text("❌ این پیش‌نمایش منقضی شده است. دوباره اطلاعات را بفرست.")
+        return
+
+    data = query.data
+    if data == "edit_menu":
+        draft["editing"] = None
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("✏️ کدام بخش را ویرایش کنم؟", reply_markup=edit_menu_markup(draft))
+        return
+    if data.startswith("edit_f:"):
+        key = data.split(":", 1)[1]
+        label = dict(fields_for(draft)).get(key)
+        if not label:
+            return
+        draft["editing"] = key
+        draft["editing_at"] = time.time()
+        await query.message.reply_text(
+            f"✏️ متن جدید «{label}» را بفرست.\n\nمقدار فعلی:\n{current_value(draft, key)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ انصراف", callback_data="edit_back")]]),
+        )
+        return
+    if data == "edit_back":
+        draft["editing"] = None
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("📌 پیش‌نمایش پست:")
+        await send_post(context.bot, query.message.chat_id, draft, extra_rows=admin_rows())
         return
 
     if query.data == "pub_now":
