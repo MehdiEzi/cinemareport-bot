@@ -18,7 +18,8 @@ import asyncio
 import logging
 from functools import lru_cache
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+import colorsys
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 from PIL import features as _pil_features
 
 log = logging.getLogger("insta")
@@ -677,7 +678,7 @@ def _fallback_tags(d):
     return tags
 
 
-def _gemini_json(prompt):
+def _gemini_json(prompt, timeout=25, total=60):
     """JSON را از Gemini می‌گیرد؛ اگر نشد None برمی‌گرداند (کلید و مدل‌ها از همان env ربات اصلی)."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
@@ -691,7 +692,7 @@ def _gemini_json(prompt):
         models.append(fb)
     body = {"contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 0.8}}
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + total
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         for attempt in range(2):
@@ -699,7 +700,7 @@ def _gemini_json(prompt):
                 return None
             try:
                 r = requests.post(url, headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                                  json=body, timeout=25)
+                                  json=body, timeout=timeout)
             except requests.RequestException:
                 time.sleep(2)
                 continue
@@ -781,6 +782,335 @@ def make_caption(d):
     return caption[:2200], used_ai
 
 
+
+# ================================================================= LIST MODE (چند اثر در یک پست)
+LW, LH = 1080, 1350
+LBG = (12, 14, 22)
+SLOGAN = "معرفی بدون اسپویل فیلم و سریال‌های با کیفیت"
+MAX_LIST = 12
+
+
+def _open(b):
+    return ImageOps.exif_transpose(Image.open(io.BytesIO(b))).convert("RGB")
+
+
+def _fade(img, box, color, a0, a1, horizontal=False):
+    x0, y0, x1, y1 = [int(v) for v in box]
+    w, h = x1 - x0, y1 - y0
+    g = Image.linear_gradient("L")
+    if horizontal:
+        g = g.rotate(90, expand=True)
+    g = g.resize((w, h), Image.BILINEAR).point(lambda v: int(255 * (a0 + (a1 - a0) * v / 255)))
+    img.paste(Image.new("RGB", (w, h), color), (x0, y0), g)
+
+
+def _glass(img, box, r=36, tint=(255, 255, 255), alpha=0.16, blur=20, border_alpha=0.4):
+    x0, y0, x1, y1 = [int(v) for v in box]
+    w, h = x1 - x0, y1 - y0
+    region = img.crop((x0, y0, x1, y1)).filter(ImageFilter.GaussianBlur(blur))
+    region = Image.blend(region, Image.new("RGB", (w, h), tint), alpha)
+    mask = _rr_mask(w, h, r)
+    img.paste(region, (x0, y0), mask)
+    inner = Image.new("L", (w, h), 0)
+    inner.paste(_rr_mask(w - 4, h - 4, max(r - 2, 1)), (2, 2))
+    ring = ImageChops.subtract(mask, inner).point(lambda v: int(v * border_alpha))
+    img.paste(Image.new("RGB", (w, h), (255, 255, 255)), (x0, y0), ring)
+
+
+def _glass_footer(img):
+    box = (48, 1226, 1032, 1324)
+    _glass(img, box, r=42, tint=(255, 255, 255), alpha=0.18, blur=20, border_alpha=0.45)
+    lines, size, lh = fit_text("[[CinamaReport]]\n" + SLOGAN, frozenset(), 900, 90, 32, 22, 1.35)
+    draw_lines(img, lines, size, lh, 1032 - 40, 48 + 40, 1226 + (98 - len(lines) * lh) / 2,
+               "center", False, WHITE)
+
+
+def accent_from(src):
+    im = src.convert("RGB")
+    im.thumbnail((48, 48))
+    bins = [0.0] * 12
+    for r, g, b in im.getdata():
+        h, s_, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        if s_ > 0.35 and v > 0.3:
+            bins[int(h * 12) % 12] += s_ * v
+    if max(bins) < 0.5:
+        return ACCENT
+    k = bins.index(max(bins))
+    r, g, b = colorsys.hsv_to_rgb((k + 0.5) / 12, 0.85, 1.0)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+def _tracked_width(text, font, tr):
+    return sum(font.getlength(ch) for ch in text) + tr * (len(text) - 1)
+
+
+def _tracked_right(d, xr, base, text, font, fill, tr):
+    if _has_rtl(text):
+        tdraw(d, xr - tlen(text, font), base, text, font, fill)
+        return
+    x = xr - _tracked_width(text, font, tr)
+    for ch in text:
+        d.text((x, base), ch, font=font, fill=fill, anchor="ls")
+        x += font.getlength(ch) + tr
+
+
+def _kind_words(ld):
+    kinds = {it.get("kind") for it in ld["items"]}
+    if kinds == {"فیلم"}:
+        return "فیلم", "فیلم‌ها"
+    if kinds == {"سریال"}:
+        return "سریال", "سریال‌ها"
+    return "اثر", "آثار"
+
+
+def _fmt_imdb(v):
+    return "—" if v is None else f"{float(v):.1f}"
+
+
+def _fmt_rt(v):
+    return "—" if v is None else f"{int(round(float(v)))}%"
+
+
+def lslide_cover(ld, posters):
+    img = Image.new("RGB", (LW, LH), LBG)
+    n = len(posters)
+    for i, b in enumerate(posters):
+        x0, x1 = round(i * LW / n), round((i + 1) * LW / n)
+        img.paste(ImageOps.fit(_open(b), (x1 - x0, 920), Image.LANCZOS, centering=(0.5, 0.3)), (x0, 0))
+    _fade(img, (0, 520, LW, 920), LBG, 0.0, 1.0)
+    text_block(img, f"**{ld['headline']}**", frozenset(), (60, 925, 1020, 1125), 76, 38,
+               align="center", justify=False, color=WHITE, lh_ratio=1.35, pad=(0, 0), valign="middle")
+    text_block(img, ld["subline"], frozenset(), (90, 1125, 990, 1215), 32, 22, align="center",
+               justify=False, color=(205, 208, 215), lh_ratio=1.5, pad=(0, 0), valign="top")
+    _glass_footer(img)
+    return img
+
+
+def lslide_ratings(ld, posters, accents):
+    img = Image.new("RGB", (LW, LH), LBG)
+    items = ld["items"]
+    n = len(items)
+    usable = 1210
+    bh = usable // n
+    d = ImageDraw.Draw(img)
+    for i, it in enumerate(items):
+        y0 = i * bh
+        y1 = LH if i == n - 1 else (i + 1) * bh
+        band = ImageOps.fit(_open(posters[i]), (LW, y1 - y0), Image.LANCZOS, centering=(0.5, 0.3))
+        img.paste(band, (0, y0))
+        _fade(img, (int(LW * 0.28), y0, LW, y1), (14, 14, 18), 0.0, 0.96, horizontal=True)
+        _fade(img, (int(LW * 0.70), y0, LW, y1), (14, 14, 18), 0.96, 0.96, horizontal=True)
+        if i:
+            d.rectangle((0, y0, LW, y0 + 1), fill=(52, 52, 58))
+        acc = accents[i]
+        t = max(34, min(108, int(bh * 0.40)))
+        short = (it.get("short") or it["title"]).upper()
+        tr = max(4, int(t * 0.16))
+        while t > 30 and _tracked_width(short, F(t, True), tr) > 590:
+            t -= 4
+            tr = max(3, int(t * 0.16))
+        sub = it["title"].upper()
+        sz = max(18, int(bh * 0.095))
+        while sz > 14 and _tracked_width(sub, F(sz, False), 2) > 590:
+            sz -= 1
+        rs = max(24, min(44, int(bh * 0.15)))
+        total = t * 0.72 + 12 + sz + 18 + rs
+        top = y0 + (bh - total) / 2
+        tb = top + t * 0.72
+        sb = tb + 12 + sz * 0.9
+        rb = sb + 18 + rs * 0.95
+        xr = 1032
+        _tracked_right(d, xr, int(tb), short, F(t, True), acc, tr)
+        _tracked_right(d, xr, int(sb), sub, F(sz, False), (225, 225, 228), 2)
+        # ردیف نمره (از راست به چپ): RT، گوجه، /10، IMDb، نشان IMDb
+        fr = F(rs, True)
+        txt = _fmt_rt(it.get("rt"))
+        x = xr - tlen(txt, fr)
+        tdraw(d, x, int(rb), txt, fr, WHITE)
+        x -= rs * 0.45
+        dot(img, int(x - rs * 0.3), int(rb - rs * 0.35), max(8, int(rs * 0.32)), (226, 62, 44))
+        x -= rs * 0.9 + 26
+        small = F(max(14, int(rs * 0.5)), False)
+        x -= tlen("/10", small)
+        tdraw(d, x, int(rb), "/10", small, (190, 190, 195))
+        val = _fmt_imdb(it.get("imdb"))
+        x -= tlen(val, fr) + 3
+        tdraw(d, x, int(rb), val, fr, WHITE)
+        bf = F(max(12, int(rs * 0.5)), True)
+        bw = tlen("IMDb", bf) + 16
+        bx1 = x - 12
+        rrect(img, (bx1 - bw, rb - rs * 0.95, bx1, rb + 2), 6, (232, 185, 40))
+        tdraw(d, bx1 - bw + 8, int(rb - rs * 0.12), "IMDb", bf, (20, 20, 20))
+    _glass_footer(img)
+    return img
+
+
+def lslide_item(it, still, acc):
+    img = Image.new("RGB", (LW, LH), LBG)
+    img.paste(ImageOps.fit(_open(still), (LW, 900), Image.LANCZOS, centering=(0.5, 0.3)), (0, 0))
+    _fade(img, (0, 520, LW, 900), LBG, 0.0, 1.0)
+    _glass(img, (60, 730, 1020, 1190), r=40, tint=(0, 0, 0), alpha=0.5, blur=24, border_alpha=0.3)
+    d = ImageDraw.Draw(img)
+    title = it["title"].upper()
+    size = 50
+    while size > 26 and tlen(title, F(size, True)) > 880:
+        size -= 2
+    f = F(size, True)
+    tdraw(d, 100, 800, title, f, acc)
+    rrect(img, (100, 816, 100 + int(min(tlen(title, f), 880) * 0.38) + 40, 821), 2, acc)
+    meta = " | ".join(x for x in (it.get("kind"), str(it.get("year") or ""), it.get("genre") or "") if x)
+    text_block(img, f"**{meta}**", frozenset(), (80, 832, 1000, 890), 32, 20, justify=False,
+               color=WHITE, lh_ratio=1.3, pad=(20, 4), valign="middle")
+    text_block(img, it.get("summary") or "—", frozenset(), (80, 892, 1000, 1176), 38, 26, justify=True,
+               color=(235, 236, 240), lh_ratio=1.62, pad=(20, 6))
+    _glass_footer(img)
+    return img
+
+
+def lslide_final(ld, posters):
+    img = Image.new("RGB", (LW, LH), LBG)
+    n = len(posters)
+    for i, b in enumerate(posters):
+        x0, x1 = round(i * LW / n), round((i + 1) * LW / n)
+        img.paste(ImageOps.fit(_open(b), (x1 - x0, LH), Image.LANCZOS, centering=(0.5, 0.3)), (x0, 0))
+    img = Image.blend(img, Image.new("RGB", (LW, LH), LBG), 0.80).filter(ImageFilter.GaussianBlur(6))
+    _, plural = _kind_words(ld)
+    text_block(img, f"**نظر شما درباره این {plural} چیه؟**", frozenset(), (60, 300, 1020, 620), 72, 40,
+               align="center", justify=False, color=WHITE, lh_ratio=1.45, pad=(0, 0), valign="middle")
+    _glass(img, (70, 680, 1010, 980), r=44, tint=(255, 255, 255), alpha=0.14, blur=22, border_alpha=0.4)
+    text_block(img, f"لینک تمامی این {plural} داخل **کانال تلگرامی** قرار گرفته؛ لینک کانال در **بایو** پیجه.",
+               frozenset(), (70, 680, 1010, 980), 42, 28, align="center", justify=False, color=WHITE,
+               lh_ratio=1.65, pad=(40, 20), valign="middle")
+    text_block(img, "نظرت رو توی کامنت‌ها برامون بنویس", frozenset(), (60, 1010, 1020, 1100), 36, 24,
+               align="center", justify=False, color=ACCENT, lh_ratio=1.4, pad=(0, 0), valign="middle")
+    _glass_footer(img)
+    return img
+
+
+def build_list_slides(ld, posters, stills):
+    pimgs = [_open(b) for b in posters]
+    accents = [accent_from(im) for im in pimgs]
+    slides = [lslide_cover(ld, posters), lslide_ratings(ld, posters, accents)]
+    for i, it in enumerate(ld["items"]):
+        slides.append(lslide_item(it, stills[i], accents[i]))
+    slides.append(lslide_final(ld, posters))
+    out = []
+    for sl in slides:
+        b = io.BytesIO()
+        sl.save(b, "JPEG", quality=95, subsampling=0)
+        out.append(b.getvalue())
+    return out
+
+
+# ---------------------------------------------------------------- list: input parsing / AI data
+def parse_list_names(text, n):
+    items = []
+    for raw in text.replace("\r", "").split("\n"):
+        l = raw.strip()
+        if not l:
+            continue
+        l = re.sub(r"^\s*[\d۰-۹]+\s*[\.\-\)،:]\s*", "", l)
+        parts = [p.strip() for p in l.split("|")]
+        if not parts[0]:
+            continue
+        nums = [_num(p) if p and p != "-" else None for p in parts[1:3]]
+        nums += [None] * (2 - len(nums))
+        items.append({"query": parts[0], "imdb_o": nums[0], "rt_o": nums[1]})
+    return items
+
+
+def _fa_num(n):
+    return str(n).translate(_FA_FROM_EN)
+
+
+_FA_FROM_EN = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+
+def fetch_list_data(entries):
+    n = len(entries)
+    listing = "\n".join(f"{i + 1}. {e['query']}" for i, e in enumerate(entries))
+    prompt = (
+        f"این {n} فیلم/سریال را برای یک پست اینستاگرامی معرفی بدون اسپویل آماده کن. به همین ترتیب:\n{listing}\n\n"
+        "خروجی فقط یک JSON با این ساختار باشد:\n"
+        '{"headline": "...", "subline": "...", "items": [{"title": "...", "short": "...", "year": "...", '
+        '"kind": "فیلم یا سریال", "imdb": 7.9, "rt": 57, "genre": "...", "summary": "..."}], '
+        '"caption": {"hook": "...", "body": "...", "hashtags": ["..."]}}\n'
+        f"- items دقیقاً {n} عضو و به همان ترتیب ورودی باشد.\n"
+        "- title: نام رسمی انگلیسی اثر. short: نام کوتاه و گیرا برای تیتر درشت (حداکثر ۱۴ حرف، انگلیسی)، "
+        "مثلاً از «Monster: The Jeffrey Dahmer Story» بشود «Dahmer».\n"
+        "- year: سال اولین پخش. kind: دقیقاً «فیلم» یا «سریال».\n"
+        "- imdb عدد از ۱۰ و rt درصد راتن تومیتوز؛ اگر مطمئن نیستی null بگذار و عدد حدسی ننویس.\n"
+        "- genre: حداکثر ۳ ژانر فارسی با ' | '.\n"
+        "- summary: خلاصه‌ی فارسی، صمیمی، بدون اسپویل، ۲ تا ۳ جمله (حداکثر ۴۵ کلمه).\n"
+        "- headline: تیتر کاور فارسی کوتاه و جذاب (حداکثر ۸ کلمه) که وجه مشترک این آثار را بگوید. "
+        "subline: یک جمله‌ی فارسی کوتاه زیر تیتر.\n"
+        "- caption.hook: یک جمله‌ی جذاب برای خط اول کپشن (یک ایموجی). caption.body: ۲ تا ۳ جمله‌ی صمیمی. "
+        "caption.hashtags: ۸ تا ۱۰ هشتگ مرتبط.\n"
+        "درباره‌ی کامنت یا لینک دانلود چیزی ننویس."
+    )
+    data = _gemini_json(prompt, timeout=45, total=110)
+    if not data or not isinstance(data.get("items"), list) or len(data["items"]) < n:
+        return None, "اطلاعات آثار از Gemini گرفته نشد (شلوغ است یا پاسخ ناقص بود)."
+    items = []
+    for i, e in enumerate(entries):
+        raw = data["items"][i] if isinstance(data["items"][i], dict) else {}
+        imdb = _num(str(raw.get("imdb"))) if raw.get("imdb") not in (None, "") else None
+        rt = _num(str(raw.get("rt"))) if raw.get("rt") not in (None, "") else None
+        if e.get("imdb_o") is not None:
+            imdb = e["imdb_o"]
+        if e.get("rt_o") is not None:
+            rt = e["rt_o"]
+        title = str(raw.get("title") or e["query"]).strip()
+        items.append({
+            "title": title,
+            "short": str(raw.get("short") or title.split(":")[0]).strip()[:16],
+            "year": str(raw.get("year") or "").strip(),
+            "kind": raw.get("kind") if raw.get("kind") in ("فیلم", "سریال") else "فیلم",
+            "imdb": imdb if imdb is None or 0 <= imdb <= 10 else None,
+            "rt": rt if rt is None or 0 <= rt <= 100 else None,
+            "genre": str(raw.get("genre") or "").strip(),
+            "summary": str(raw.get("summary") or "").strip(),
+        })
+    ld = {"items": items, "caption": data.get("caption") if isinstance(data.get("caption"), dict) else {}}
+    word, _ = _kind_words(ld)
+    ld["headline"] = str(data.get("headline") or "").strip() or f"معرفی {_fa_num(n)} {word} که باید ببینی"
+    ld["subline"] = (str(data.get("subline") or "").strip()
+                     or "خلاصه و امتیاز هر کدوم رو توی اسلایدهای بعدی ببین.")
+    return ld, None
+
+
+def list_caption(ld):
+    word, plural = _kind_words(ld)
+    cap = ld.get("caption") or {}
+    hook = str(cap.get("hook") or "").strip() or f"🎬 {len(ld['items'])} {word} که نباید از دستشون بدی!"
+    body = str(cap.get("body") or "").strip()
+    lines = [hook, ""]
+    if body:
+        lines += [body, ""]
+    for it in ld["items"]:
+        emo = "🎬" if it["kind"] == "فیلم" else "📺"
+        yr = f" ({it['year']})" if it["year"] else ""
+        lines.append(f"{emo} {it['title']}{yr} | ⭐ {_fmt_imdb(it['imdb'])} | 🍅 {_fmt_rt(it['rt'])}")
+    lines += [
+        "",
+        f"📥 لینک دانلود رایگان همه‌ی این {plural} در کانال تلگرامی ما قرار گرفته؛ لینک کانال توی بایو پیجه.",
+        f"💬 نظر شما درباره این {plural} چیه؟ توی کامنت‌ها بنویس!",
+        "",
+    ]
+    tags = ["#سینما_ریپورت", "#CinamaReport", "#معرفی_فیلم_و_سریال"]
+    tags += [_title_tag(it["title"]) for it in ld["items"]]
+    tags += list(cap.get("hashtags") or [])
+    lines.append(" ".join(_clean_tags(tags, limit=20)))
+    return "\n".join(lines).strip()[:2200]
+
+
+def list_info_text(ld):
+    rows = []
+    for i, it in enumerate(ld["items"], 1):
+        rows.append(f"{i}. {it['title']} ({it['year']}) — IMDb: {_fmt_imdb(it['imdb'])} | RT: {_fmt_rt(it['rt'])}")
+    return "\n".join(rows)
+
+
 # ---------------------------------------------------------------- telegram glue
 IMG_STEPS = [
     (1, "عکس کاور (عکس اصلی بالای اسلاید اول)"),
@@ -801,15 +1131,51 @@ def _allowed(update):
     return update.effective_user and update.effective_user.id in allowed
 
 
+def _chunk_sizes(n):
+    """تلگرام در هر آلبوم حداکثر ۱۰ فایل می‌پذیرد؛ تقسیم متعادل."""
+    k = -(-n // 10)
+    return [n // k + (1 if i < n % k else 0) for i in range(k)]
+
+
 def register(application):
     """هندلرها را در گروه -1 ثبت می‌کند تا قبل از هندلرهای فعلی ربات اجرا شوند.
-    تا وقتی کاربر وسط جریان /insta نباشد، هیچ پیامی را نمی‌گیرد."""
+    تا وقتی کاربر وسط جریان /insta یا /insta_list نباشد، هیچ پیامی را نمی‌گیرد."""
     from telegram import InputMediaDocument, InputMediaPhoto
     from telegram.ext import (ApplicationHandlerStop, CommandHandler, MessageHandler, filters)
 
+    def _clear(context):
+        for k in ("insta", "insta_list", "insta_fix"):
+            context.user_data.pop(k, None)
+
+    async def get_image(msg):
+        f = None
+        if msg.photo:
+            f = await msg.photo[-1].get_file()
+        elif msg.document and (msg.document.mime_type or "").startswith("image/"):
+            f = await msg.document.get_file()
+        return bytes(await f.download_as_bytearray()) if f else None
+
+    async def send_album(msg, slides):
+        pos = 0
+        for sz in _chunk_sizes(len(slides)):
+            await msg.reply_media_group([InputMediaPhoto(x) for x in slides[pos:pos + sz]])
+            pos += sz
+        pos, idx = 0, 1
+        for sz in _chunk_sizes(len(slides)):
+            files = []
+            for x in slides[pos:pos + sz]:
+                bio = io.BytesIO(x)
+                bio.name = f"slide_{idx}.jpg"
+                idx += 1
+                files.append(InputMediaDocument(bio))
+            pos += sz
+            await msg.reply_media_group(files)
+
+    # ------------------------------------------------------------ /insta (یک اثر)
     async def cmd_start(update, context):
         if not _allowed(update):
             return
+        _clear(context)
         context.user_data["insta"] = {"step": "post", "imgs": {}, "queue": list(IMG_STEPS)}
         await update.message.reply_text(
             "پست کانال را کپی/فوروارد کن (می‌توانی خط‌های اختیاری هم اضافه کنی):\n"
@@ -820,12 +1186,177 @@ def register(application):
         raise ApplicationHandlerStop
 
     async def cmd_cancel(update, context):
-        if context.user_data.pop("insta", None) is not None:
+        if not _allowed(update):
+            return
+        had = any(context.user_data.get(k) for k in ("insta", "insta_list", "insta_fix"))
+        _clear(context)
+        if had:
             await update.message.reply_text("ساخت پست اینستاگرام لغو شد.")
             raise ApplicationHandlerStop
 
+    # ------------------------------------------------------------ /insta_list (چند اثر)
+    async def cmd_list_start(update, context):
+        if not _allowed(update):
+            return
+        _clear(context)
+        context.user_data["insta_list"] = {"step": "count"}
+        await update.message.reply_text(
+            f"چند فیلم/سریال می‌خواهی در این پست معرفی کنی؟ (یک عدد بین ۲ تا {MAX_LIST})\n"
+            "برای انصراف: /insta_cancel"
+        )
+        raise ApplicationHandlerStop
+
+    async def cmd_fix(update, context):
+        if not _allowed(update):
+            return
+        last = context.user_data.get("insta_list_last")
+        if not last:
+            await update.message.reply_text("پست چندتایی‌ای برای اصلاح پیدا نشد (شاید ربات ری‌استارت شده). دوباره /insta_list را بزن.")
+            raise ApplicationHandlerStop
+        _clear(context)
+        context.user_data["insta_fix"] = True
+        await update.message.reply_text(
+            "نمره‌های فعلی:\n" + list_info_text(last["ld"]) + "\n\n"
+            "برای اصلاح، هر اثر را در یک خط بفرست: شماره | IMDb | راتن\n"
+            "مثال: 2 | 7.7 | 47\n"
+            "برای نگه‌داشتن یک مقدار، به‌جایش - بزن؛ مثال: 3 | - | 65\n"
+            "برای انصراف: /insta_cancel"
+        )
+        raise ApplicationHandlerStop
+
+    async def deliver_list(msg, ld, slides):
+        await send_album(msg, slides)
+        await msg.reply_text("✅ آماده شد. آلبوم دوم (فایل) با کیفیت کامل است.")
+        await msg.reply_text(
+            "📊 اطلاعاتی که استخراج شد (نمره‌ها را حتماً چک کن؛ اگر غلط بود /insta_fix را بزن):\n"
+            + list_info_text(ld)
+        )
+        await msg.reply_text("📝 کپشن پیشنهادی اینستاگرام (برای کپی، نگه دار و Copy را بزن):")
+        await msg.reply_text(list_caption(ld))
+
+    async def run_build(msg, context):
+        st = context.user_data["insta_list"]
+        await msg.reply_text("⏳ در حال گرفتن اطلاعات آثار (ممکن است ۱۰ تا ۴۰ ثانیه طول بکشد)...")
+        ld, err = await asyncio.to_thread(fetch_list_data, st["entries"])
+        if ld is None:
+            st["step"] = "retry"
+            await msg.reply_text(f"❌ {err}\nعکس‌هایت نگه داشته شد. «دوباره» را بنویس تا تلاش کنم، یا /insta_cancel.")
+            return
+        await msg.reply_text("🎨 در حال ساخت اسلایدها...")
+        slides = await asyncio.to_thread(build_list_slides, ld, st["posters"], st["stills"])
+        context.user_data["insta_list_last"] = {"ld": ld, "posters": st["posters"], "stills": st["stills"]}
+        context.user_data.pop("insta_list", None)
+        await deliver_list(msg, ld, slides)
+
+    async def handle_list(update, context):
+        msg = update.message
+        ud = context.user_data
+        try:
+            if ud.get("insta_fix"):
+                last = ud.get("insta_list_last")
+                ld = last["ld"]
+                changed = 0
+                for raw in (msg.text or "").splitlines():
+                    parts = [x for x in re.split(r"[|\s]+", raw.strip()) if x]
+                    if len(parts) < 2:
+                        continue
+                    idx = _num(parts[0])
+                    if idx is None or not 1 <= int(idx) <= len(ld["items"]):
+                        continue
+                    it = ld["items"][int(idx) - 1]
+                    for key, pi, hi in (("imdb", 1, 10), ("rt", 2, 100)):
+                        if len(parts) > pi and parts[pi] not in ("-", "—"):
+                            v = _num(parts[pi])
+                            if v is not None and 0 <= v <= hi:
+                                it[key] = v
+                    changed += 1
+                if not changed:
+                    await msg.reply_text("چیزی نفهمیدم. فرمت: 2 | 7.7 | 47  (یا /insta_cancel)")
+                    return
+                ud.pop("insta_fix", None)
+                await msg.reply_text("🎨 در حال ساخت دوباره‌ی اسلایدها...")
+                slides = await asyncio.to_thread(build_list_slides, ld, last["posters"], last["stills"])
+                await deliver_list(msg, ld, slides)
+                return
+
+            st = ud["insta_list"]
+            step = st["step"]
+            if step == "count":
+                m = re.search(r"\d+", (msg.text or "").translate(PERSIAN_DIGITS))
+                n = int(m.group()) if m else 0
+                if not 2 <= n <= MAX_LIST:
+                    await msg.reply_text(f"یک عدد بین ۲ تا {MAX_LIST} بفرست.")
+                    return
+                st["n"], st["step"] = n, "names"
+                await msg.reply_text(
+                    f"اسم {n} اثر را بفرست، هر کدام در یک خط (برای دقت بیشتر می‌توانی سال را هم بنویسی):\n"
+                    "The Leftovers\nDahmer 2022\n\n"
+                    "اگر نمره‌ی مطمئنی داری، می‌توانی کنار اسم بنویسی (اختیاری):\n"
+                    "Dahmer 2022 | 7.9 | 57"
+                )
+            elif step == "names":
+                entries = parse_list_names(msg.text or "", st["n"])
+                if len(entries) != st["n"]:
+                    await msg.reply_text(f"{len(entries)} خط دریافت شد، ولی گفتی {st['n']} اثر. دوباره بفرست (هر اثر یک خط).")
+                    return
+                st["entries"], st["posters"], st["stills"], st["step"] = entries, [], [], "posters"
+                await msg.reply_text(
+                    "حالا برای هر اثر یک «پوستر یا تصویر کاور» بفرست (برای نوارهای کاور و اسلاید نمرات).\n"
+                    f"۱ از {st['n']}: {entries[0]['query']}"
+                )
+            elif step == "posters":
+                data = await get_image(msg)
+                if data is None:
+                    await msg.reply_text("لطفاً یک عکس بفرست.")
+                    return
+                st["posters"].append(data)
+                k = len(st["posters"])
+                if k < st["n"]:
+                    await msg.reply_text(f"{k + 1} از {st['n']}: {st['entries'][k]['query']}")
+                else:
+                    st["step"] = "stills"
+                    await msg.reply_text(
+                        "حالا برای هر اثر یک «عکس اسلاید خلاصه» بفرست.\n"
+                        "اگر می‌خواهی از همان پوستر استفاده شود، بنویس «همین»؛ برای همه‌ی بقیه: «همه همین».\n"
+                        f"۱ از {st['n']}: {st['entries'][0]['query']}"
+                    )
+            elif step == "stills":
+                txt = (msg.text or "").strip()
+                k = len(st["stills"])
+                if txt == "همه همین":
+                    st["stills"].extend(st["posters"][k:])
+                elif txt == "همین":
+                    st["stills"].append(st["posters"][k])
+                else:
+                    data = await get_image(msg)
+                    if data is None:
+                        await msg.reply_text("یک عکس بفرست، یا بنویس «همین» / «همه همین».")
+                        return
+                    st["stills"].append(data)
+                k = len(st["stills"])
+                if k < st["n"]:
+                    await msg.reply_text(f"{k + 1} از {st['n']}: {st['entries'][k]['query']}")
+                else:
+                    await run_build(msg, context)
+            elif step == "retry":
+                if (msg.text or "").strip() == "دوباره":
+                    await run_build(msg, context)
+                else:
+                    await msg.reply_text("«دوباره» را بنویس یا /insta_cancel را بزن.")
+        except Exception as e:
+            log.exception("insta list failed")
+            _clear(context)
+            await msg.reply_text(f"❌ خطا: {e}")
+
+    # ------------------------------------------------------------ پیام‌ها
     async def on_message(update, context):
-        st = context.user_data.get("insta")
+        ud = context.user_data
+        if ud.get("insta_list") or ud.get("insta_fix"):
+            if not _allowed(update):
+                return
+            await handle_list(update, context)
+            raise ApplicationHandlerStop
+        st = ud.get("insta")
         if not st or not _allowed(update):
             return  # اجازه بده بقیه هندلرهای ربات کار خودشان را بکنند
         msg = update.message
@@ -848,13 +1379,7 @@ def register(application):
                         f"حالا {st['queue'][0][1]} را بفرست:"
                     )
             elif st["step"] == "imgs":
-                data = None
-                if msg.photo:
-                    f = await msg.photo[-1].get_file()
-                    data = bytes(await f.download_as_bytearray())
-                elif msg.document and (msg.document.mime_type or "").startswith("image/"):
-                    f = await msg.document.get_file()
-                    data = bytes(await f.download_as_bytearray())
+                data = await get_image(msg)
                 if data is None:
                     await msg.reply_text("لطفاً یک عکس بفرست.")
                 else:
@@ -865,14 +1390,8 @@ def register(application):
                     else:
                         await msg.reply_text("⏳ در حال ساخت اسلایدها...")
                         slides = await asyncio.to_thread(build_slides, st["data"], st["imgs"])
-                        context.user_data.pop("insta", None)
-                        await msg.reply_media_group([InputMediaPhoto(s) for s in slides])
-                        files = []
-                        for i, s in enumerate(slides, 1):
-                            bio = io.BytesIO(s)
-                            bio.name = f"slide_{i}.jpg"
-                            files.append(InputMediaDocument(bio))
-                        await msg.reply_media_group(files)
+                        ud.pop("insta", None)
+                        await send_album(msg, slides)
                         await msg.reply_text("✅ آماده شد. نسخه دوم (فایل) با کیفیت کامل است.")
                         try:
                             caption, used_ai = await asyncio.to_thread(make_caption, st["data"])
@@ -887,11 +1406,13 @@ def register(application):
             raise
         except Exception as e:
             log.exception("insta failed")
-            context.user_data.pop("insta", None)
+            ud.pop("insta", None)
             await msg.reply_text(f"❌ خطا در ساخت پست: {e}")
         raise ApplicationHandlerStop
 
     application.add_handler(CommandHandler("insta", cmd_start), group=-1)
+    application.add_handler(CommandHandler("insta_list", cmd_list_start), group=-1)
+    application.add_handler(CommandHandler("insta_fix", cmd_fix), group=-1)
     application.add_handler(CommandHandler("insta_cancel", cmd_cancel), group=-1)
     application.add_handler(
         MessageHandler((filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.Document.IMAGE,
