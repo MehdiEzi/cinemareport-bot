@@ -425,7 +425,7 @@ def _heading(img, text, base=250, size=78):
 
 def _logo(img, box):
     x0, y0, x1, y1 = box
-    rrect(img, box, 16, ACCENT)
+    rrect(img, box, 18, ACCENT)
     if os.path.exists(LOGO_PATH):
         try:
             lg = Image.open(LOGO_PATH).convert("RGBA")
@@ -435,16 +435,24 @@ def _logo(img, box):
         except Exception:
             log.exception("logo load failed")
     d = ImageDraw.Draw(img)
-    f = F(40, True)
-    tw = tlen("CR", f)
-    tdraw(d, (x0 + x1 - tw) / 2, (y0 + y1) / 2 + 14, "CR", f, (40, 40, 40))
+    size = 40
+    while size > 20 and max(tlen("Cinama", F(size, True)), tlen("Report", F(size, True))) > (x1 - x0) - 24:
+        size -= 2
+    f = F(size, True)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    tdraw(d, cx - tlen("Cinama", f) / 2, cy - size * 0.12, "Cinama", f, (40, 40, 40))
+    tdraw(d, cx - tlen("Report", f) / 2, cy + size * 0.95, "Report", f, (40, 40, 40))
+
+
+FOOTER_CTA = "**لینک دانلود رایگان**\nدر [[کانال تلگرامی]] قرار گرفت"
+FOOTER_FINAL = "[[@cinamareport]]\nمعرفی فیلم و سریال بدون اسپویل"
 
 
 def _footer(img, markup):
-    rrect(img, (24, 1344, 1056, 1420), 28, BAR)
-    _logo(img, (44, 1330, 132, 1432))
-    lines, size, lh = fit_text(markup, frozenset(), 880, 70, 34, 24, 1.3)
-    draw_lines(img, lines, size, lh, 1032, 160, 1344 + (76 - len(lines) * lh) / 2, "center", False, WHITE)
+    rrect(img, (24, 1300, 1056, 1424), 30, BAR)
+    _logo(img, (44, 1286, 214, 1438))
+    lines, size, lh = fit_text(markup, frozenset(), 780, 116, 38, 24, 1.4)
+    draw_lines(img, lines, size, lh, 1034, 244, 1300 + (124 - len(lines) * lh) / 2, "center", False, WHITE)
 
 
 def _frame(img, src, frame_box, mode="cover"):
@@ -455,10 +463,6 @@ def _frame(img, src, frame_box, mode="cover"):
 
 def _card(img, box):
     rrect(img, box, 48, CARD)
-
-
-def _footer_cta(kw):
-    return f"برای دریافت **لینک دانلود** و تماشا کلمه [[{kw}]] رو کامنت کنید!"
 
 
 # ---------------------------------------------------------------- slides
@@ -491,8 +495,8 @@ def slide_cover(d, src, kw):
         rows = rows[:2]
         for i, row in enumerate(rows):
             tdraw(dr, 992 - tlen(row, f), 215 + i * 80, row, f, TEXT)
-    _frame(img, src, (68, 340, 1012, 960))
-    _card(img, (85, 990, 995, 1312))
+    _frame(img, src, (68, 340, 1012, 930))
+    _card(img, (85, 960, 995, 1262))
     parts = []
     if d["genres"]:
         parts.append(f"**ژانر:** {d['genres']}")
@@ -504,9 +508,9 @@ def slide_cover(d, src, kw):
         parts.append(f"**بازیگران:** {'، '.join(d['cast'])}")
     if d["extra"]:
         parts.append(f"**{d['extra_label']}:** {d['extra']}")
-    text_block(img, "\n".join(parts), _bold_names(d), (85, 990, 995, 1312), 38, 24,
+    text_block(img, "\n".join(parts), _bold_names(d), (85, 960, 995, 1262), 38, 24,
                justify=False, lh_ratio=1.5, pad=(36, 16), valign="middle", names=_names(d))
-    _footer(img, _footer_cta(kw))
+    _footer(img, FOOTER_CTA)
     return img
 
 
@@ -516,7 +520,7 @@ def _text_slide(d, src, kw, heading, body):
     _frame(img, src, (68, 330, 1012, 800))
     _card(img, (85, 860, 995, 1215))
     text_block(img, body, _bold_names(d), (85, 860, 995, 1215), 40, 28, justify=True, names=_names(d))
-    _footer(img, _footer_cta(kw))
+    _footer(img, FOOTER_CTA)
     return img
 
 
@@ -599,34 +603,27 @@ def slide_ratings(d, kw):
         text_block(img, f"**{d['title']}** ({d['year']})\n{d['genres']}", frozenset(),
                    (85, 860, 995, 1040), 40, 26, align="center", justify=False, pad=(30, 14),
                    valign="middle")
-    _footer(img, _footer_cta(kw))
+    _footer(img, FOOTER_CTA)
     return img
 
 
-def slide_final(d, src, kw):
+def slide_final(d, src, kw=""):
     img = Image.new("RGB", (W, H), BG)
-    dr = ImageDraw.Draw(img)
     _frame(img, src, (68, 50, 1012, 770), mode="contain")
-    this = "این فیلم" if d["kind"] == "فیلم" else "این سریال"
-    f1, f2 = F(54, True), F(54, True)
-    l1, l2 = "برای دریافت لینک دانلود", f"و تماشای {this}"
-    tdraw(dr, 540 - tlen(l1, f1) / 2, 880, l1, f1, TEXT)
-    tdraw(dr, 540 - tlen(l2, f2) / 2, 952, l2, f2, TEXT)
-    l3 = "زیر همین پست کامنت کن"
-    f3 = F(36, False)
-    tdraw(dr, 540 - tlen(l3, f3) / 2, 1030, l3, f3, MUTED)
-    rrect(img, (270, 1060, 810, 1270), 40, WHITE, outline=ACCENT, ow=5)
-    for size in range(120, 44, -4):
-        fk = F(size, True)
-        if tlen(kw, fk) <= 470:
-            break
-    tdraw(dr, 540 - tlen(kw, fk) / 2, 1165 + size * 0.32, kw, fk, TEXT)
-    _footer(img, "[[@cinamareport]] معرفی فیلم و سریال بدون اسپویل")
+    this = "فیلم" if d["kind"] == "فیلم" else "سریال"
+    body = (f"برای دریافت لینک دانلود این {this} و دیگر آثار معرفی‌شده به "
+            f"**کانال تلگرامی** که در **بایو پیج** هست مراجعه کنید.")
+    text_block(img, body, frozenset(), (68, 790, 1012, 1090), 50, 34, align="center",
+               justify=False, lh_ratio=1.6, pad=(30, 10), valign="middle")
+    rrect(img, (170, 1110, 910, 1252), 40, WHITE, outline=ACCENT, ow=5)
+    text_block(img, "همراهی شما دلگرمی ماست", frozenset(), (170, 1110, 910, 1252), 56, 30,
+               align="center", justify=False, lh_ratio=1.3, pad=(30, 10), valign="middle")
+    _footer(img, FOOTER_FINAL)
     return img
 
 
 # ---------------------------------------------------------------- public API
-def build_slides(data, images, keyword):
+def build_slides(data, images, keyword=""):
     """images: dict با کلیدهای 1,2,3,5 -> bytes. خروجی: لیست ۵ تا JPEG (bytes)"""
     def load(i):
         return Image.open(io.BytesIO(images[i]))
@@ -705,20 +702,13 @@ def register(application):
                         await msg.reply_text(f"❌ {e}")
                         raise ApplicationHandlerStop
                     dd = st["data"]
-                    st["step"] = "kw"
+                    st["step"] = "imgs"
                     await msg.reply_text(
                         f"✅ {dd['title']} ({dd['year']}) خوانده شد.\n"
                         f"IMDb: {dd['imdb']} | RT: {dd['rt']} | Meta: {dd['meta']} | "
                         f"قسمت‌ها: {len(dd['episodes'])}\n\n"
-                        "کلمه کامنت را بفرست (مثلاً: خون):"
+                        f"حالا {st['queue'][0][1]} را بفرست:"
                     )
-            elif st["step"] == "kw":
-                if not msg.text:
-                    await msg.reply_text("کلمه کامنت را به صورت متن بفرست.")
-                else:
-                    st["kw"] = msg.text.strip()
-                    st["step"] = "imgs"
-                    await msg.reply_text(f"حالا {st['queue'][0][1]} را بفرست:")
             elif st["step"] == "imgs":
                 data = None
                 if msg.photo:
@@ -736,7 +726,7 @@ def register(application):
                         await msg.reply_text(f"حالا {st['queue'][0][1]} را بفرست:")
                     else:
                         await msg.reply_text("⏳ در حال ساخت اسلایدها...")
-                        slides = await asyncio.to_thread(build_slides, st["data"], st["imgs"], st["kw"])
+                        slides = await asyncio.to_thread(build_slides, st["data"], st["imgs"])
                         context.user_data.pop("insta", None)
                         await msg.reply_media_group([InputMediaPhoto(s) for s in slides])
                         files = []
