@@ -643,6 +643,144 @@ def build_slides(data, images, keyword=""):
     return out
 
 
+
+# ---------------------------------------------------------------- caption
+def _hashtag(text):
+    t = re.sub(r"[^\w\u0600-\u06FF\u200c]+", " ", text or "").strip().replace("\u200c", "_")
+    t = re.sub(r"\s+", "_", t).strip("_")
+    return f"#{t}" if t else ""
+
+
+def _title_tag(title):
+    latin = re.sub(r"[^A-Za-z0-9]+", "", title or "")
+    return f"#{latin}" if latin else _hashtag(title)
+
+
+def _clean_tags(tags, limit=15):
+    out, seen = [], set()
+    for t in tags:
+        t = _hashtag(str(t).lstrip("#")) if not str(t).startswith("#") or " " in str(t) else str(t)
+        t = re.sub(r"[^\w\u0600-\u06FF#]", "", t)
+        if len(t) > 1 and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out[:limit]
+
+
+def _fallback_tags(d):
+    kind = d["kind"]
+    tags = [f"#معرفی_{kind}", f"#{kind}", "#سینما_ریپورت", "#CinamaReport", _title_tag(d["title"])]
+    tags += [_hashtag(g) for g in re.split(r"[،,]", d["genres"]) if g.strip()][:3]
+    tags += [_hashtag(n) for n in d["cast"][:2]]
+    if d["director"]:
+        tags.append(_hashtag(d["director"]))
+    return tags
+
+
+def _gemini_json(prompt):
+    """JSON را از Gemini می‌گیرد؛ اگر نشد None برمی‌گرداند (کلید و مدل‌ها از همان env ربات اصلی)."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        return None
+    import json
+    import time
+    import requests
+    models = [os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")]
+    fb = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.8-flash")
+    if fb and fb not in models:
+        models.append(fb)
+    body = {"contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.8}}
+    deadline = time.monotonic() + 60
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        for attempt in range(2):
+            if time.monotonic() > deadline:
+                return None
+            try:
+                r = requests.post(url, headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                                  json=body, timeout=25)
+            except requests.RequestException:
+                time.sleep(2)
+                continue
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(3 * (attempt + 1))
+                continue
+            if r.status_code != 200:
+                break
+            try:
+                parts = r.json()["candidates"][0]["content"]["parts"]
+                text = "".join(p.get("text", "") for p in parts).strip()
+                text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.M).strip()
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                log.exception("caption parse failed")
+    return None
+
+
+def make_caption(d):
+    """-> (کپشن, با_هوش_مصنوعی_ساخته_شد)"""
+    kind = d["kind"]
+    emoji = "🎬" if kind == "فیلم" else "📺"
+    prompt = (
+        f"برای پیج اینستاگرام معرفی فیلم و سریال، کپشن {kind} «{d['title']}» ({d['year']}) را بنویس.\n"
+        "فقط بر اساس اطلاعات زیر بنویس و چیزی از خودت اضافه نکن:\n"
+        f"ژانر: {d['genres']}\nبازیگران: {'، '.join(d['cast'])}\nکارگردان: {d['director']}\n"
+        f"خلاصه: {d['summary']}\nدلیل دیدن: {d['why']}\n\n"
+        "خروجی فقط یک JSON با کلیدهای hook, body, hashtags باشد:\n"
+        "- hook: یک جمله‌ی جذاب و کنجکاوکننده برای خط اول (حداکثر ۱۲ کلمه، یک ایموجی)\n"
+        "- body: ۲ تا ۳ جمله‌ی کوتاه، صمیمی و خودمونی، بدون اسپویل\n"
+        "- hashtags: آرایه‌ای از ۶ تا ۸ هشتگ اختصاصی (نام اثر انگلیسی، بازیگران و ژانر؛ "
+        "فاصله‌ها با _ جایگزین شوند)\n"
+        "درباره‌ی کامنت گذاشتن یا لینک دانلود چیزی ننویس."
+    )
+    ai = None
+    try:
+        ai = _gemini_json(prompt)
+    except Exception:
+        log.exception("caption AI failed")
+    hook = body = ""
+    extra = []
+    if ai:
+        hook = str(ai.get("hook") or "").strip()
+        body = str(ai.get("body") or "").strip()
+        extra = ai.get("hashtags") if isinstance(ai.get("hashtags"), list) else []
+    used_ai = bool(hook and body)
+    if not used_ai:
+        first_genre = (d["genres"].split("،")[0].strip() if d["genres"] else "")
+        hook = (f"{emoji} اگه عاشق ژانر {first_genre} هستی، «{d['title']}» رو از دست نده!"
+                if first_genre else f"{emoji} «{d['title']}» رو دیدی؟")
+        body = (d["summary"] or "")[:350].strip()
+
+    info = []
+    if d["imdb"] is not None:
+        info.append(f"⭐ IMDb: {d['imdb']:g}")
+    if d["rt"] is not None:
+        info.append(f"🍅 Rotten Tomatoes: {d['rt']:g}%")
+    if d["meta"] is not None:
+        info.append(f"Ⓜ️ Metacritic: {d['meta']:g}")
+    lines = [hook, "", body, ""]
+    if info:
+        lines.append(" | ".join(info))
+    if d["genres"]:
+        lines.append(f"🎭 {d['genres']}")
+    if d["cast"]:
+        lines.append(f"👤 {'، '.join(d['cast'])}")
+    lines += [
+        "",
+        f"📥 لینک دانلود رایگان این {kind} در کانال تلگرامی ما قرار گرفته؛ لینک کانال توی بایو پیجه.",
+        "🍿 دیگر آثار معرفی‌شده رو هم از همون‌جا ببین.",
+        "",
+        "💾 ذخیره کن و برای دوستی که عاشق سینماست بفرست!",
+        "",
+        " ".join(_clean_tags(_fallback_tags(d)[:5] + list(extra) + _fallback_tags(d)[5:])),
+    ]
+    caption = "\n".join(lines).strip()
+    return caption[:2200], used_ai
+
+
 # ---------------------------------------------------------------- telegram glue
 IMG_STEPS = [
     (1, "عکس کاور (عکس اصلی بالای اسلاید اول)"),
@@ -736,6 +874,15 @@ def register(application):
                             files.append(InputMediaDocument(bio))
                         await msg.reply_media_group(files)
                         await msg.reply_text("✅ آماده شد. نسخه دوم (فایل) با کیفیت کامل است.")
+                        try:
+                            caption, used_ai = await asyncio.to_thread(make_caption, st["data"])
+                            await msg.reply_text("📝 کپشن پیشنهادی اینستاگرام (برای کپی، نگه دار و Copy را بزن):")
+                            await msg.reply_text(caption)
+                            if not used_ai:
+                                await msg.reply_text("ℹ️ Gemini جواب نداد؛ کپشن با قالب ساده ساخته شد.")
+                        except Exception:
+                            log.exception("caption failed")
+                            await msg.reply_text("⚠️ ساخت کپشن خطا داد، ولی اسلایدها آماده‌اند.")
         except ApplicationHandlerStop:
             raise
         except Exception as e:
